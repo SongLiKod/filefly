@@ -57,10 +57,10 @@ export const SpecialView: React.FC<{ path: string }> = ({ path }) => {
           const files = await api.tagFilesOf(tag);
           if (!alive) return;
           setEntries(
-            files.map(([p, tags]) => ({
-              name: p.split(/[\\/]/).pop() ?? p, path: p, isDir: false,
-              size: 0, mtime: 0, ext: p.split(".").pop()?.toLowerCase() ?? null,
-              hidden: false, placeholderState: "none", tags,
+            files.map((f) => ({
+              name: f.path.split(/[\\/]/).pop() ?? f.path, path: f.path, isDir: f.isDir,
+              size: 0, mtime: 0, ext: f.isDir ? null : f.path.split(".").pop()?.toLowerCase() ?? null,
+              hidden: false, placeholderState: "none" as const, tags: f.tags,
             }))
           );
         } else if (path === "__recent__") {

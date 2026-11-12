@@ -44,13 +44,30 @@ pub async fn tag_remove(path: String, tag: String, state: S<'_>) -> Result<(), S
     .map_err(|e| e.to_string())?
 }
 
-/// 按标签跨路径聚合（F-21）
+/// 按标签跨路径聚合（F-21）：返回目录信息，前端才能正确打开文件夹
+#[derive(serde::Serialize)]
+pub struct TaggedPath {
+    pub path: String,
+    pub tags: Vec<String>,
+    pub is_dir: bool,
+}
+
 #[tauri::command]
-pub async fn tag_files_of(tag: String, state: S<'_>) -> Result<Vec<(String, Vec<String>)>, String> {
+pub async fn tag_files_of(tag: String, state: S<'_>) -> Result<Vec<TaggedPath>, String> {
     let db = state.db.clone();
-    tauri::async_runtime::spawn_blocking(move || Ok(store::files_of_tag(&db, &tag)))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let rows = store::files_of_tag(&db, &tag);
+        Ok(rows
+            .into_iter()
+            .map(|(p, tags)| TaggedPath {
+                is_dir: std::fs::metadata(&p).map(|m| m.is_dir()).unwrap_or(false),
+                path: p,
+                tags,
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // 标签定义增删改（用户需求：标签可新建/重命名/删除/改色）

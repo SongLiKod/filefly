@@ -73,15 +73,27 @@ export const Sidebar: React.FC = () => {
     : FALLBACK_FAVORITES;
 
   useEffect(() => {
-    // 标签聚合计数
-    (async () => {
+    // 标签聚合计数：并行查询 + 单个失败不拖垮整批；监听 ff-refresh，打新标签后立即刷新
+    let alive = true;
+    const loadCounts = async () => {
+      const results = await Promise.all(
+        defs.map(async (d): Promise<[string, number]> => {
+          try {
+            const files = await api.tagFilesOf(d.name);
+            return [d.name, files.length];
+          } catch {
+            return [d.name, -1]; // 查询失败保持旧值，不显示为 0
+          }
+        }),
+      );
+      if (!alive) return;
       const counts: Record<string, number> = {};
-      for (const d of defs) {
-        const files = await api.tagFilesOf(d.name);
-        counts[d.name] = files.length;
-      }
+      for (const [n, c] of results) if (c >= 0) counts[n] = c;
       setTagCounts(counts);
-    })();
+    };
+    loadCounts();
+    window.addEventListener("ff-refresh", loadCounts);
+    return () => { alive = false; window.removeEventListener("ff-refresh", loadCounts); };
   }, [defs]);
 
   const Sec: React.FC<{ title: string; icon: React.ReactNode; children: React.ReactNode }> = ({ title, icon, children }) => (
