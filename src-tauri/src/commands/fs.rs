@@ -412,6 +412,30 @@ pub async fn fs_record_recent(path: String, kind: Option<String>, state: S<'_>) 
             rusqlite::params![path, kind.unwrap_or_else(|| "file".into())],
         )
         .map(|_| ())
+        .map_err(|e| e.to_string())?;
+
+    // 自动上限：只保留最近 500 条不同路径的记录，防止无限累计膨胀
+    state
+        .db
+        .conn
+        .lock()
+        .execute(
+            "DELETE FROM recent_items WHERE path NOT IN (SELECT path FROM recent_items ORDER BY opened_at DESC LIMIT 500)",
+            [],
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// 清空最近使用记录（用户主动；不影响文件本身）
+#[tauri::command]
+pub async fn fs_recent_clear(state: S<'_>) -> Result<(), String> {
+    state
+        .db
+        .conn
+        .lock()
+        .execute("DELETE FROM recent_items", [])
+        .map(|_| ())
         .map_err(|e| e.to_string())
 }
 

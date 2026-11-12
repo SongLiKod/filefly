@@ -23,7 +23,8 @@ export async function openEntrySmart(
   isDir: boolean,
   navigate?: () => void
 ): Promise<void> {
-  api.fsRecordRecent(path);
+  // 记录"最近使用"（F-22）：fire-and-forget，失败不影响打开动作（此前命令未注册时此处静默失败导致记录表恒空）
+  api.fsRecordRecent(path, isDir ? "location" : "file").catch(() => {});
   if (isDir) {
     navigate?.();
     return;

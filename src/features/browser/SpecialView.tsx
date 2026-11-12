@@ -25,6 +25,7 @@ export const SpecialView: React.FC<{ path: string }> = ({ path }) => {
   const [trashLimit, setTrashLimit] = useState(300);
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
+  const [hint, setHint] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -33,6 +34,7 @@ export const SpecialView: React.FC<{ path: string }> = ({ path }) => {
     setNetDrives(null);
     setLoadErr(null);
     setTrashLimit(300);
+    setHint(null);
     // 看门狗：30s 未返回显式报错，绝不无限停留在骨架屏
     const watchdog = setTimeout(() => {
       if (alive) { setLoading(false); setLoadErr("加载超时（30 秒），可点击重试"); }
@@ -65,13 +67,25 @@ export const SpecialView: React.FC<{ path: string }> = ({ path }) => {
           setTitle("最近使用");
           const rows = await api.fsRecent();
           if (!alive) return;
-          setEntries(
-            rows.map(([p, kind, t]) => ({
-              name: p.split(/[\\/]/).pop() ?? p, path: p, isDir: kind === "location",
-              size: 0, mtime: t * 1000, ext: p.split(".").pop()?.toLowerCase() ?? null,
-              hidden: false, placeholderState: "none", tags: [],
-            }))
-          );
+          let list = rows.map(([p, kind, t]) => ({
+            name: p.split(/[\\/]/).pop() ?? p, path: p, isDir: kind === "location",
+            size: 0, mtime: t * 1000, ext: p.split(".").pop()?.toLowerCase() ?? null,
+            hidden: false, placeholderState: "none" as const, tags: [] as string[],
+          }));
+          if (list.length === 0) {
+            // 兜底：真实打开记录尚空（新版首次使用）→ 回退"最近修改的文件"（与首页统计同源），避免空白页
+            const home = useApp.getState().specialDirs?.home ?? "";
+            const stats = await api.fsHomeStats(home);
+            if (!alive) return;
+            list = (stats.recentFiles ?? []).map((f) => ({
+              name: f.path.split(/[\\/]/).pop() ?? f.path, path: f.path, isDir: false,
+              size: 0, mtime: f.mtime > 0 && f.mtime < 10_000_000_000 ? f.mtime * 1000 : f.mtime,
+              ext: f.path.split(".").pop()?.toLowerCase() ?? null,
+              hidden: false, placeholderState: "none" as const, tags: [] as string[],
+            }));
+            if (alive && list.length > 0) setHint("以下为最近修改的文件 · 双击打开后，这里会积累你自己的打开记录");
+          }
+          setEntries(list);
         } else if (path.startsWith("__category__:")) {
           const key = path.slice("__category__:".length); // 前缀实长 13（此前 slice(12) 多留冒号 → 后端报"未知分类：:image"）
           setTitle(CATEGORY_LABELS[key] ?? key);
@@ -101,7 +115,26 @@ export const SpecialView: React.FC<{ path: string }> = ({ path }) => {
         <Icons.Tag />
         <strong style={{ fontSize: 16 }}>{title || "…"}</strong>
         <span style={{ color: "var(--ff-text-secondary)", fontSize: 12 }}>跨路径聚合 · {entries.length} 项</span>
+        {path === "__recent__" && !loading && !hint && entries.length > 0 && (
+          <button
+            className="btn-ghost"
+            style={{ marginLeft: "auto", fontSize: 12 }}
+            onClick={async () => {
+              const ok = await confirmDialog("清空最近使用", `确定清空全部 ${entries.length} 条打开记录吗？此操作不影响文件本身。`, { danger: true, confirmText: "清空" });
+              if (!ok) return;
+              await api.fsRecentClear();
+              setReload((n) => n + 1);
+            }}
+          >
+            <Icons.Trash size={13} /> 清空记录
+          </button>
+        )}
       </div>
+      {hint && (
+        <div style={{ padding: "6px 20px", fontSize: 12, color: "var(--ff-text-secondary)", background: "var(--ff-bg-card)", borderBottom: "1px solid var(--ff-border)" }}>
+          ⓘ {hint}
+        </div>
+      )}
       {path === "__trash__" && (
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "12px 20px" }}>
           {trash && (

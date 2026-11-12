@@ -48,6 +48,7 @@ export const api = {
   fsStat: (path: string) => invoke<import("./types").EntryMeta>("fs_stat", { path }),
   fsHomeStats: (home: string) => invoke<import("./types").HomeStats>("fs_home_stats", { home }),
   fsRecent: () => invoke<[string, string, number][]>("fs_recent"),
+  fsRecentClear: () => invoke("fs_recent_clear"),
   fsRecordRecent: (path: string, kind?: string) => invoke("fs_record_recent", { path, kind }),
   fsOperation: (kind: string, sources: string[], target?: string, conflict?: string) =>
     invoke<[boolean, string]>("fs_operation", { kind, sources, target, conflict }),

@@ -1040,7 +1040,7 @@ dependencies = [
 
 [[package]]
 name = "filefly"
-version = "0.1.14"
+version = "0.1.17"
 dependencies = [
  "aes-gcm",
  "anyhow",
