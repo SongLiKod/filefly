@@ -195,11 +195,13 @@ export interface DirSizeInfo {
   partial: boolean;
 }
 
-/** 标签聚合条目（tag_files_of 返回；isDir 让文件夹可正常进入） */
+/** 标签聚合条目（tag_files_of 返回；isDir 让文件夹可正常进入；mtime/size 为真实 stat） */
 export interface TaggedPath {
   path: string;
   tags: string[];
   isDir: boolean;
+  mtime: number;
+  size: number;
 }
 
 // ---------------- 空间分析 / 清理 ----------------

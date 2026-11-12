@@ -60,7 +60,8 @@ export const SpecialView: React.FC<{ path: string }> = ({ path }) => {
           setEntries(
             files.map((f) => ({
               name: f.path.split(/[\\/]/).pop() ?? f.path, path: f.path, isDir: f.isDir,
-              size: 0, mtime: 0, ext: f.isDir ? null : f.path.split(".").pop()?.toLowerCase() ?? null,
+              size: f.size, mtime: f.mtime,
+              ext: f.isDir ? null : f.path.split(".").pop()?.toLowerCase() ?? null,
               hidden: false, placeholderState: "none" as const, tags: f.tags,
             }))
           );

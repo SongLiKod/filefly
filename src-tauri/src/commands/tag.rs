@@ -44,12 +44,14 @@ pub async fn tag_remove(path: String, tag: String, state: S<'_>) -> Result<(), S
     .map_err(|e| e.to_string())?
 }
 
-/// 按标签跨路径聚合（F-21）：返回目录信息，前端才能正确打开文件夹
+/// 按标签跨路径聚合（F-21）：返回目录信息与真实 stat，前端行展示与目录浏览完全一致
 #[derive(serde::Serialize)]
 pub struct TaggedPath {
     pub path: String,
     pub tags: Vec<String>,
     pub is_dir: bool,
+    pub mtime: i64,
+    pub size: u64,
 }
 
 #[tauri::command]
@@ -59,10 +61,20 @@ pub async fn tag_files_of(tag: String, state: S<'_>) -> Result<Vec<TaggedPath>, 
         let rows = store::files_of_tag(&db, &tag);
         Ok(rows
             .into_iter()
-            .map(|(p, tags)| TaggedPath {
-                is_dir: std::fs::metadata(&p).map(|m| m.is_dir()).unwrap_or(false),
-                path: p,
-                tags,
+            .map(|(p, tags)| {
+                let (is_dir, mtime, size) = match std::fs::metadata(&p) {
+                    Ok(m) => (
+                        m.is_dir(),
+                        m.modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_millis() as i64)
+                            .unwrap_or(0),
+                        if m.is_dir() { 0 } else { m.len() },
+                    ),
+                    Err(_) => (false, 0, 0), // 已删除/不可访问：按失效文件展示
+                };
+                TaggedPath { path: p, tags, is_dir, mtime, size }
             })
             .collect())
     })
