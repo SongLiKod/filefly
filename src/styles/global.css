@@ -220,6 +220,14 @@ html[data-theme="dark"] .search-pill:focus-within { box-shadow: 0 0 0 3px rgba(7
 }
 .preview-overlay { animation: preview-in 120ms ease; } /* §9 空格预览 scale .96→1 + fade 120ms */
 
+/* 预览内容区允许选中复制（全局禁选只针对界面外壳）；标题栏/按钮仍禁选 */
+.preview-selectable {
+  user-select: text;
+}
+.preview-selectable button {
+  user-select: none;
+}
+
 @keyframes fade-up {
   from { transform: translateY(6px); opacity: 0; }
   to { transform: translateY(0); opacity: 1; }

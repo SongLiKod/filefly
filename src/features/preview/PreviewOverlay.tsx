@@ -66,8 +66,8 @@ export const PreviewOverlay: React.FC = () => {
               <button className="btn-ghost" title="关闭预览（Esc）" onClick={close}><Icons.Close /></button>
             </div>
           </div>
-          <div style={{ flex: 1, minHeight: 0 }}>
-            {/* 预览内容单独包错误边界：内部崩溃只关浮层回主界面，绝不波及整个应用 */}
+          {/* 预览内容单独包错误边界：内部崩溃只关浮层回主界面，绝不波及整个应用；preview-selectable 允许选中复制 */}
+          <div className="preview-selectable" style={{ flex: 1, minHeight: 0 }}>
             <ErrorBoundary
               label="预览"
               fallback={(err, reset) => (
