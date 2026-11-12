@@ -1,0 +1,76 @@
+[package]
+name = "filefly"
+version = "0.1.8"
+description = "FileFly · Let your files fly. 让文件飞 — 跨平台现代文件管理器"
+authors = ["FileFly"]
+edition = "2021"
+rust-version = "1.80"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["devtools", "protocol-asset", "tray-icon"] }
+tauri-plugin-shell = "2"
+# 开机自启动（注册表 Run 键，技术文档设置项）
+tauri-plugin-autostart = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+rayon = "1"
+# 本地数据库：标签库、搜索索引、最近使用、设置（技术文档 §1）
+rusqlite = { version = "0.32", features = ["bundled", "functions", "column_decltype"] }
+# 加密保险箱：AES-256-GCM + Argon2id（技术文档 §7）
+aes-gcm = { version = "0.10", features = ["aes", "rand_core"] }
+argon2 = { version = "0.5", features = ["std"] }
+rand = "0.8"
+sha2 = "0.10"
+zeroize = "1"
+# 图片解码与 EXIF（技术文档 §6）
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp", "tiff"] }
+kamadak-exif = "0.6"
+# 回收站
+trash = "5"
+# 文件系统监听兜底（exFAT/网络盘降级轮询用 notify 之外的实现，见 index/scanner.rs）
+walkdir = "2"
+# 压缩包免解压浏览（P1）
+zip = { version = "2", default-features = false, features = ["deflate"] }
+sevenz-rust = "0.6"
+# 代码高亮 token 流（Tree-sitter，技术文档 §1）
+tree-sitter = "0.24"
+# 拼音匹配（F-10）
+pinyin = "0.10"
+# 长路径 / Unicode 工具
+same-file = "1"
+# 真实用户目录（桌面/文档/图片/音乐/视频/下载，SHGetKnownFolderPath 封装）
+dirs = "6"
+once_cell = "1"
+anyhow = "1"
+thiserror = "1"
+parking_lot = "0.12"
+cfb = "0.16.0"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+  "Win32_Storage_FileSystem",
+  "Win32_Security",
+  "Win32_Storage",
+  "Win32_System_IO",
+  "Win32_Foundation",
+  "Win32_System_Threading",
+] }
+# 拦截系统右键菜单占位（IShellItem 完整实现随 shell.rs 渐进）
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# FSEvents 绑定（M4 里程碑接入）
+core-foundation = "0.10"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

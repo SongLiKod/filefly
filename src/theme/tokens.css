@@ -1,0 +1,48 @@
+/* 由 scripts/gen-tokens.mjs 自动生成，来源：packages/theme-tokens/tokens.json。请勿手改。 */
+:root, html[data-theme="light"] {
+  --ff-primary: #2E6BE6;
+  --ff-primary-hover: #1F5AD1;
+  --ff-primary-active: #1749B8;
+  --ff-accent: #00B8C4;
+  --ff-success: #1F9D55;
+  --ff-warning: #D97706;
+  --ff-danger: #DC2626;
+  --ff-bg-app: #F3F6FC;
+  --ff-bg-sidebar: rgba(246,249,255,.86);
+  --ff-bg-content: #FFFFFF;
+  --ff-bg-card: #FFFFFF;
+  --ff-bg-hover: rgba(46,107,230,.07);
+  --ff-bg-selected: rgba(46,107,230,.15);
+  --ff-border: #DDE4F2;
+  --ff-text-primary: #171A21;
+  --ff-text-secondary: #5A6478;
+  --ff-text-disabled: #9AA3B5;
+  --ff-highlight: #FFE58F;
+  --ff-highlight-text: #1A1D22;
+  --ff-logo-gradient: linear-gradient(135deg, #2E6BE6 0%, #00B8C4 100%);
+  --ff-glass: backdrop-filter: blur(24px) saturate(1.4);
+}
+html[data-theme="dark"] {
+  --ff-primary: #4C8DFF;
+  --ff-primary-hover: #3D7BE8;
+  --ff-primary-active: #2E66C9;
+  --ff-accent: #22D3D9;
+  --ff-success: #2ECC71;
+  --ff-warning: #F59E0B;
+  --ff-danger: #EF4444;
+  --ff-bg-app: #0E1116;
+  --ff-bg-sidebar: rgba(14,17,22,.84);
+  --ff-bg-content: #161A20;
+  --ff-bg-card: #1D222B;
+  --ff-bg-hover: rgba(76,141,255,.12);
+  --ff-bg-selected: rgba(76,141,255,.20);
+  --ff-border: #2A303C;
+  --ff-text-primary: #EAECF2;
+  --ff-text-secondary: #98A2B8;
+  --ff-text-disabled: #5A6478;
+  --ff-highlight: #8A6D00;
+  --ff-highlight-text: #FFFFFF;
+}
+html { color-scheme: light; }
+html[data-theme="dark"] { color-scheme: dark; }
+* { transition: background-color var(--ff-theme-switch, 150ms) ease, color var(--ff-theme-switch, 150ms) ease, border-color var(--ff-theme-switch, 150ms) ease; }
