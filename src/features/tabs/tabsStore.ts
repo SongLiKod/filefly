@@ -42,6 +42,50 @@ let HOME_PATH = "C:\\Users\\demo";
 
 export { HOME_PATH };
 
+// ---- 会话持久化（F-04 记住会话）：标签页路径/历史 + 双栏模式存 localStorage ----
+const TABS_KEY = "ff-tabs-session";
+interface SavedTab { path: string; title?: string; history?: string[]; historyIndex?: number }
+interface SavedSession { tabs: SavedTab[]; active: number; rightTabs: SavedTab[]; rightActive: number; dualPane?: boolean }
+
+function loadSession(): { tabs: Tab[]; activeIndex: number; rightTabs: Tab[]; rightActiveIndex: number; dualPane: boolean } | null {
+  try {
+    const raw = localStorage.getItem(TABS_KEY);
+    if (!raw) return null;
+    const s = JSON.parse(raw) as SavedSession;
+    if (!Array.isArray(s.tabs) || s.tabs.length === 0) return null;
+    const revive = (t: SavedTab): Tab => {
+      const history = Array.isArray(t.history) && t.history.length > 0 ? t.history : [t.path];
+      return {
+        id: `t-${Math.random().toString(36).slice(2, 9)}`,
+        title: t.title ?? t.path.split(/[\\/]/).filter(Boolean).pop() ?? "首页",
+        path: t.path,
+        history,
+        historyIndex: Math.min(Math.max(t.historyIndex ?? 0, 0), history.length - 1),
+      };
+    };
+    return {
+      tabs: s.tabs.map(revive),
+      activeIndex: Math.min(Math.max(s.active ?? 0, 0), s.tabs.length - 1),
+      rightTabs: Array.isArray(s.rightTabs) && s.rightTabs.length > 0 ? s.rightTabs.map(revive) : [mkTab(HOME_PATH)],
+      rightActiveIndex: Math.min(Math.max(s.rightActive ?? 0, 0), (s.rightTabs?.length ?? 1) - 1),
+      dualPane: !!s.dualPane,
+    };
+  } catch { return null; }
+}
+
+function saveSession() {
+  const s = useTabs.getState();
+  const dump = (tabs: Tab[], activeId: string) => ({
+    tabs: tabs.map((t) => ({ path: t.path, title: t.title, history: t.history, historyIndex: t.historyIndex })),
+    active: Math.max(0, tabs.findIndex((t) => t.id === activeId)),
+  });
+  const left = dump(s.tabs, s.activeTabId);
+  const right = dump(s.rightTabs, s.rightActiveTabId);
+  try {
+    localStorage.setItem(TABS_KEY, JSON.stringify({ ...left, rightTabs: right.tabs, rightActive: right.active, dualPane: s.dualPane }));
+  } catch { /* 存储满等异常静默 */ }
+}
+
 /** 用真实用户目录替换占位路径，并同步已打开的占位标签页 */
 export function setHomePath(p: string) {
   if (!p || p === HOME_PATH) return;
@@ -52,11 +96,14 @@ export function setHomePath(p: string) {
   useTabs.setState((s) => ({ tabs: s.tabs.map(fix), rightTabs: s.rightTabs.map(fix) }));
 }
 
+// 启动时恢复上次会话（只解析一次，保证 tabs/双栏状态一致）
+const restoredSession = loadSession();
+
 export const useTabs = create<TabsState>((set, get) => ({
-  tabs: [mkTab(HOME_PATH)],
+  tabs: restoredSession?.tabs ?? [mkTab(HOME_PATH)],
   activeTabId: "",
-  dualPane: false,
-  rightTabs: [mkTab(HOME_PATH)],
+  dualPane: restoredSession?.dualPane ?? false,
+  rightTabs: restoredSession?.rightTabs ?? [mkTab(HOME_PATH)],
   rightActiveTabId: "",
   addTab: (path) =>
     set((s) => {
@@ -146,10 +193,16 @@ export const useTabs = create<TabsState>((set, get) => ({
   },
 }));
 
-// 初始化 activeTabId
+// 初始化 activeTabId（若有会话恢复则指向保存时的活动标签）
 if (!useTabs.getState().activeTabId) {
-  useTabs.setState({ activeTabId: useTabs.getState().tabs[0].id, rightActiveTabId: useTabs.getState().rightTabs[0].id });
+  useTabs.setState({
+    activeTabId: useTabs.getState().tabs[restoredSession?.activeIndex ?? 0].id,
+    rightActiveTabId: useTabs.getState().rightTabs[restoredSession?.rightActiveIndex ?? 0].id,
+  });
 }
+
+// 任何标签页/双栏状态变化都落盘（数据量小，无需防抖）
+useTabs.subscribe(saveSession);
 
 /** 剪贴板（F-01 剪切：Ctrl+X 置灰半透明显示待剪项，粘贴时执行移动，技术文档 §9） */
 interface ClipboardState {

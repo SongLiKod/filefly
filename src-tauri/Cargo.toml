@@ -1,6 +1,6 @@
 [package]
 name = "filefly"
-version = "0.1.17"
+version = "0.1.19"
 description = "FileFly · Let your files fly. 让文件飞 — 跨平台现代文件管理器"
 authors = ["FileFly"]
 edition = "2021"

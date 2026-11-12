@@ -36,12 +36,21 @@ interface AppState {
   toggleOpen: (k: "settingsOpen" | "commandPaletteOpen" | "batchRenameOpen" | "duplicatesOpen") => void;
 }
 
+const VIEW_MODES: ViewMode[] = ["list", "grid", "details"];
+const savedViewMode = localStorage.getItem("ff-view-mode") as ViewMode | null;
+// 初始视图模式：默认"详情"，手动切换后持久化到 localStorage
+const initViewMode: ViewMode = savedViewMode && VIEW_MODES.includes(savedViewMode) ? savedViewMode : "details";
+// 排序/隐藏文件持久化
+const SORT_FIELDS: SortField[] = ["name", "size", "mtime", "ext"];
+const savedSortField = localStorage.getItem("ff-sort-field") as SortField | null;
+const savedSortOrder = localStorage.getItem("ff-sort-order") as SortOrder | null;
+
 export const useApp = create<AppState>((set) => ({
   theme: (localStorage.getItem("ff-theme") as "light" | "dark") ?? "system",
-  viewMode: "list",
-  sortField: "name",
-  sortOrder: "asc",
-  showHidden: false,
+  viewMode: initViewMode,
+  sortField: savedSortField && SORT_FIELDS.includes(savedSortField) ? savedSortField : "name",
+  sortOrder: savedSortOrder === "desc" ? "desc" : "asc",
+  showHidden: localStorage.getItem("ff-show-hidden") === "1",
   filter: "",
   settingsOpen: false,
   commandPaletteOpen: false,
@@ -65,10 +74,21 @@ export const useApp = create<AppState>((set) => ({
     document.documentElement.setAttribute("data-theme", effective);
     set({ theme: t });
   },
-  setViewMode: (viewMode) => set({ viewMode }),
+  setViewMode: (viewMode) => {
+    localStorage.setItem("ff-view-mode", viewMode);
+    set({ viewMode });
+  },
   setSort: (sortField, sortOrder) =>
-    set((s) => ({ sortField, sortOrder: sortOrder ?? (s.sortField === sortField && s.sortOrder === "asc" ? "desc" : "asc") })),
-  setShowHidden: (showHidden) => set({ showHidden }),
+    set((s) => {
+      const order = sortOrder ?? (s.sortField === sortField && s.sortOrder === "asc" ? "desc" : "asc");
+      localStorage.setItem("ff-sort-field", sortField);
+      localStorage.setItem("ff-sort-order", order);
+      return { sortField, sortOrder: order };
+    }),
+  setShowHidden: (showHidden) => {
+    localStorage.setItem("ff-show-hidden", showHidden ? "1" : "0");
+    set({ showHidden });
+  },
   setFilter: (filter) => set((s) => ({ filter: s.filter === filter ? "" : filter })),
   setSelection: (selection) => set({ selection }),
   setPendingReveal: (pendingReveal) => set({ pendingReveal }),

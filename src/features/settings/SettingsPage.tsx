@@ -4,6 +4,7 @@ import { Modal } from "@/components/ui";
 import { useApp, type ViewMode } from "./appStore";
 import { Icons } from "@/components/Icons";
 import { invoke } from "@/ipc/client";
+import pkg from "../../../package.json";
 
 export const SettingsPage: React.FC = () => {
   const open = useApp((s) => s.settingsOpen);
@@ -91,7 +92,7 @@ export const SettingsPage: React.FC = () => {
       </Section>
 
       <Section title="关于">
-        <Row label="FileFly" hint="Let your files fly · 让文件飞 · v0.1.0"><Icons.Logo size={22} /></Row>
+        <Row label="FileFly" hint={`Let your files fly · 让文件飞 · v${pkg.version}`}><Icons.Logo size={22} /></Row>
       </Section>
     </Modal>
   );
