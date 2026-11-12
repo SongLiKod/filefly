@@ -53,6 +53,8 @@ export const Icons = {
   Pause: (p: { size?: number }) => <svg width={p.size ?? 16} height={p.size ?? 16} viewBox="0 0 24 24" fill="currentColor"><path d="M7 5h4v14H7V5z M13 5h4v14h-4V5z" /></svg>,
   ZoomIn: (p: { size?: number }) => <I {...p} d="M10 4a6 6 0 1 1 0 12 6 6 0 0 1 0-12z M20 20l-4.5-4.5 M10 7v6 M7 10h6" />,
   ZoomOut: (p: { size?: number }) => <I {...p} d="M10 4a6 6 0 1 1 0 12 6 6 0 0 1 0-12z M20 20l-4.5-4.5 M7 10h6" />,
+  Maximize: (p: { size?: number }) => <I {...p} d="M4 9V4h5 M15 4h5v5 M20 15v5h-5 M9 20H4v-5" />,
+  Minimize: (p: { size?: number }) => <I {...p} d="M9 4v5H4 M20 9h-5V4 M15 20v-5h5 M4 15h5v5" />,
   Disk: (p: { size?: number }) => <I {...p} d="M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z" />,
   // —— 用户目录专用图标（侧栏收藏区，配主题 8 色板）——
   DesktopDir: (p: { size?: number; color?: string }) => <I {...p} d="M3 4.5h18v11.5H3V4.5z M9 20h6 M12 16v4 M6.5 12.5l3-3 2 2 3.5-3.5 3 3" />,

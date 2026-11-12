@@ -125,6 +125,8 @@ export interface VaultItem {
   name: string;
   encPath: string;
   addedAt: number;
+  /** 原始位置（0.1.9 起存入的条目才有；旧条目为 null，无法自动还原） */
+  origPath: string | null;
 }
 
 export interface ArchiveMember {

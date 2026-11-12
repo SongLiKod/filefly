@@ -211,8 +211,18 @@ pub fn change_master_password(
         .collect();
     drop(conn);
 
-    // (id, path, old_blob, new_blob, old_enc_name, new_enc_name)
-    let mut prepared: Vec<(i64, String, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> = Vec::new();
+    // 单条目的重加密产物：内容 blob + 名称密文 + 原始路径密文（三者都以主密钥加密，需同步换钥）
+    struct PreparedItem {
+        id: i64,
+        path: String,
+        old_blob: Vec<u8>,
+        new_blob: Vec<u8>,
+        old_enc_name: Vec<u8>,
+        new_enc_name: Vec<u8>,
+        old_enc_orig: Option<Vec<u8>>,
+        new_enc_orig: Option<Vec<u8>>,
+    }
+    let mut prepared: Vec<PreparedItem> = Vec::new();
     let mut reencrypted = 0usize;
     for (id, enc_path, enc_name) in rows {
         let old_blob = std::fs::read(&enc_path)
@@ -227,7 +237,25 @@ pub fn change_master_password(
                 };
                 let new_blob = crypto::encrypt_with_key(&plain, &new_key)?;
                 let new_enc_name = crypto::encrypt_with_key(&plain_name, &new_key)?;
-                prepared.push((id, enc_path, old_blob, new_blob, enc_name, new_enc_name));
+                // enc_orig_path 同步换钥（NULL / 解不开 → 保持 None 原样）
+                let (old_enc_orig, new_enc_orig) = {
+                    let conn = db.conn.lock();
+                    let orig: Option<Vec<u8>> = conn
+                        .query_row("SELECT enc_orig_path FROM vault_items WHERE id = ?1", params![id], |r| {
+                            use rusqlite::types::ValueRef;
+                            Ok(match r.get_ref(0) { Ok(ValueRef::Blob(b)) => Some(b.to_vec()), Ok(ValueRef::Text(t)) => Some(t.to_vec()), _ => None })
+                        })
+                        .unwrap_or(None);
+                    drop(conn);
+                    match orig.as_ref().and_then(|b| crypto::decrypt_with_key(b, &old_key).ok()) {
+                        Some(plain_orig) => {
+                            let re = crypto::encrypt_with_key(&plain_orig, &new_key).ok();
+                            (orig, re)
+                        }
+                        None => (None, None),
+                    }
+                };
+                prepared.push(PreparedItem { id, path: enc_path, old_blob, new_blob, old_enc_name: enc_name, new_enc_name, old_enc_orig, new_enc_orig });
                 reencrypted += 1;
             }
             Err(_) => continue,
@@ -236,49 +264,49 @@ pub fn change_master_password(
 
     // 4. 写盘：逐文件替换；中途失败则把已写的恢复为原内容
     let mut written: Vec<usize> = Vec::new(); // 已写入的 prepared 下标
-    for (i, (_, path, _, new_blob, _, _)) in prepared.iter().enumerate() {
-        if let Err(e) = std::fs::write(path, new_blob) {
+    for (i, item) in prepared.iter().enumerate() {
+        if let Err(e) = std::fs::write(&item.path, &item.new_blob) {
             for j in &written {
-                let (_, p, ob, _, _, _) = &prepared[*j];
-                let _ = std::fs::write(p, ob);
+                let it = &prepared[*j];
+                let _ = std::fs::write(&it.path, &it.old_blob);
             }
             return Err(format!("写入重加密文件失败：{}", e));
         }
         written.push(i);
     }
 
-    // 5. 更新条目名称密文（enc_name 以主密钥加密，需同步换钥）；失败回滚文件与名称
+    // 5. 更新条目名称与原始路径密文（均以主密钥加密，需同步换钥）；失败回滚文件与密文
     let mut names_result: Result<(), String> = Ok(());
-    for (id, _, _, _, _, new_enc) in &prepared {
+    for it in &prepared {
         if let Err(e) = db.conn.lock().execute(
-            "UPDATE vault_items SET enc_name = ?1 WHERE id = ?2",
-            params![new_enc, id],
+            "UPDATE vault_items SET enc_name = ?1, enc_orig_path = ?2 WHERE id = ?3",
+            params![it.new_enc_name, it.new_enc_orig, it.id],
         ) {
             names_result = Err(e.to_string());
             break;
         }
     }
     if let Err(e) = names_result {
-        for (id, path, old_blob, _, old_enc, _) in &prepared {
+        for it in &prepared {
             let _ = db.conn.lock().execute(
-                "UPDATE vault_items SET enc_name = ?1 WHERE id = ?2",
-                params![old_enc, id],
+                "UPDATE vault_items SET enc_name = ?1, enc_orig_path = ?2 WHERE id = ?3",
+                params![it.old_enc_name, it.old_enc_orig, it.id],
             );
-            let _ = std::fs::write(path, old_blob);
+            let _ = std::fs::write(&it.path, &it.old_blob);
         }
         return Err(format!("更新条目名称密文失败：{}", e));
     }
 
-    // 6. 最后更新 meta（新盐 + 新校验值）；失败则整体回滚文件与名称密文
+    // 6. 最后更新 meta（新盐 + 新校验值）；失败则整体回滚文件与密文
     if let Err(e) = db.conn.lock().execute(
         "UPDATE vault_meta SET kdf_salt = ?1, verifier = ?2 WHERE id = 1",
         params![new_salt.to_vec(), new_verifier.to_vec()],
     ) {
-        for (id, path, old_blob, _, old_enc, _) in &prepared {
-            let _ = std::fs::write(path, old_blob);
+        for it in &prepared {
+            let _ = std::fs::write(&it.path, &it.old_blob);
             let _ = db.conn.lock().execute(
-                "UPDATE vault_items SET enc_name = ?1 WHERE id = ?2",
-                params![old_enc, id],
+                "UPDATE vault_items SET enc_name = ?1, enc_orig_path = ?2 WHERE id = ?3",
+                params![it.old_enc_name, it.old_enc_orig, it.id],
             );
         }
         return Err(format!("更新密钥元数据失败：{}", e));
@@ -293,6 +321,8 @@ pub fn add_item(db: &Db, src_path: &str, key: &[u8; 32]) -> Result<(), String> {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "未命名".into());
     let enc_name = crypto::encrypt_with_key(orig_name.as_bytes(), key)?;
+    // 原始完整路径加密保存（移出还原到原位置用，0.1.9）
+    let enc_orig = crypto::encrypt_with_key(src_path.as_bytes(), key)?;
     let blob = crypto::encrypt_with_key(&plain, key)?;
     let fname = format!("{}.ffb", uuid_like());
     let dest = vault_dir().join(&fname);
@@ -300,8 +330,8 @@ pub fn add_item(db: &Db, src_path: &str, key: &[u8; 32]) -> Result<(), String> {
     std::fs::write(&dest, &blob).map_err(|e| e.to_string())?;
     db.conn.lock()
         .execute(
-            "INSERT INTO vault_items(enc_name, enc_path, added_at) VALUES(?1, ?2, strftime('%s','now'))",
-            params![enc_name, dest.to_string_lossy()],
+            "INSERT INTO vault_items(enc_name, enc_path, enc_orig_path, added_at) VALUES(?1, ?2, ?3, strftime('%s','now'))",
+            params![enc_name, dest.to_string_lossy(), enc_orig],
         )
         .map_err(|e| e.to_string())?;
     // 原文件移入系统回收站（可恢复，与 UI 提示一致）；回收站不可用时回退为直接删除
@@ -326,18 +356,21 @@ fn row_bytes(r: &rusqlite::Row<'_>, idx: usize) -> Vec<u8> {
 /// 浏览走解密流（虚拟目录）：解锁后用主密钥解密条目名
 pub fn list_items(db: &Db, key: &[u8; 32]) -> Result<Vec<VaultItem>, String> {
     let conn = db.conn.lock();
-    let rows: Vec<(i64, Vec<u8>, String, i64)> = conn
-        .prepare("SELECT id, enc_name, enc_path, added_at FROM vault_items ORDER BY added_at DESC")
+    let rows: Vec<(i64, Vec<u8>, String, i64, Option<Vec<u8>>)> = conn
+        .prepare("SELECT id, enc_name, enc_path, added_at, enc_orig_path FROM vault_items ORDER BY added_at DESC")
         .map_err(|e| e.to_string())?
         .query_map([], |r| {
-            Ok((r.get(0)?, row_bytes(r, 1), r.get::<_, String>(2)?, r.get(3)?))
+            Ok((r.get(0)?, row_bytes(r, 1), r.get::<_, String>(2)?, r.get(3)?, {
+                use rusqlite::types::ValueRef;
+                match r.get_ref(4) { Ok(ValueRef::Blob(b)) => Some(b.to_vec()), Ok(ValueRef::Text(t)) => Some(t.to_vec()), _ => None }
+            }))
         })
         .map_err(|e| e.to_string())?
         .filter_map(|r| r.ok())
         .collect();
     drop(conn);
     let mut out = Vec::new();
-    for (id, enc_name, enc_path, added_at) in rows {
+    for (id, enc_name, enc_path, added_at, enc_orig) in rows {
         // 新格式：密文名称；旧格式（TEXT 随机文件名）：解密必失败，显示原始 .ffb 名
         let name = crypto::decrypt_with_key(&enc_name, key)
             .ok()
@@ -346,7 +379,11 @@ pub fn list_items(db: &Db, key: &[u8; 32]) -> Result<Vec<VaultItem>, String> {
                 let s = String::from_utf8_lossy(&enc_name).to_string();
                 if s.ends_with(".ffb") { format!("（旧版条目）{}", &s[..s.len().min(12)]) } else { "<加密名称>".into() }
             });
-        out.push(VaultItem { id, name, enc_path, added_at });
+        // 原始路径解密（0.1.9 起存入的条目才有；旧条目为 NULL）
+        let orig_path = enc_orig
+            .and_then(|b| crypto::decrypt_with_key(&b, key).ok())
+            .and_then(|b| String::from_utf8(b).ok());
+        out.push(VaultItem { id, name, enc_path, added_at, orig_path });
     }
     Ok(out)
 }
@@ -511,6 +548,75 @@ pub fn open_item(db: &Db, id: i64, key: &[u8; 32], dest_dir: &str) -> Result<Str
     Ok(dest.to_string_lossy().to_string())
 }
 
+/// 移出还原（0.1.9）：解密内容写回存入时的原始位置；成功后才删除密文与记录。
+/// 目录不存在自动重建；目标重名自动加序号（name (1).ext）；返回还原后的实际路径。
+pub fn restore_item(db: &Db, id: i64, key: &[u8; 32]) -> Result<String, String> {
+    let (enc_path, enc_name, enc_orig) = {
+        let conn = db.conn.lock();
+        conn.query_row(
+            "SELECT enc_path, enc_name, enc_orig_path FROM vault_items WHERE id = ?1",
+            params![id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    row_bytes(r, 1),
+                    {
+                        use rusqlite::types::ValueRef;
+                        match r.get_ref(2) { Ok(ValueRef::Blob(b)) => Some(b.to_vec()), Ok(ValueRef::Text(t)) => Some(t.to_vec()), _ => None }
+                    },
+                ))
+            },
+        )
+        .map_err(|_| "条目不存在".to_string())?
+    };
+    // 旧条目（0.1.9 前）没有记录原始位置 → 明确报错，不误删数据
+    let orig_full = enc_orig
+        .and_then(|b| crypto::decrypt_with_key(&b, key).ok())
+        .and_then(|b| String::from_utf8(b).ok())
+        .filter(|s| !s.is_empty())
+        .ok_or("该条目未记录原始位置（旧版存入），无法自动还原；可先打开后另存到需要的位置")?;
+    let orig_dir = std::path::Path::new(&orig_full)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .ok_or_else(|| format!("无法解析原始目录：{}", orig_full))?;
+    std::fs::create_dir_all(&orig_dir).map_err(|e| format!("创建原位置目录失败（{}）：{}", orig_dir.display(), e))?;
+
+    let blob = std::fs::read(&enc_path).map_err(|e| e.to_string())?;
+    let plain = crypto::decrypt_with_key(&blob, key)?;
+    let name = crypto::decrypt_with_key(&enc_name, key)
+        .ok()
+        .and_then(|b| String::from_utf8(b).ok())
+        .filter(|s| !s.contains(['\\', '/']) && !s.contains(".."))
+        .unwrap_or_else(|| format!("vault-{}", id));
+    let name = ensure_ext(&name, &plain);
+
+    // 重名去重：report.txt → report (1).txt → report (2).txt
+    let target_base = orig_dir.join(&name);
+    let mut target = target_base.clone();
+    let stem = std::path::Path::new(&name)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| name.clone());
+    let ext = std::path::Path::new(&name)
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let mut seq = 1u32;
+    while target.exists() {
+        target = orig_dir.join(format!("{} ({}){}", stem, seq, ext));
+        seq += 1;
+    }
+
+    // 先写明文，成功后才删除密文与记录（失败时保险箱数据完好）
+    std::fs::write(&target, &plain).map_err(|e| format!("写入原位置失败：{}", e))?;
+    let _ = std::fs::remove_file(&enc_path);
+    db.conn.lock()
+        .execute("DELETE FROM vault_items WHERE id = ?1", params![id])
+        .map(|_| ())
+        .map_err(|e| e.to_string())?;
+    Ok(target.to_string_lossy().to_string())
+}
+
 pub fn remove_item(db: &Db, id: i64) -> Result<(), String> {
     let conn = db.conn.lock();
     let enc_path: String = conn
@@ -528,12 +634,120 @@ pub struct VaultItem {
     pub name: String,
     pub enc_path: String,
     pub added_at: i64,
+    /// 原始位置（解密后；0.1.9 前存入的旧条目为 None，无法自动还原）
+    pub orig_path: Option<String>,
 }
 
 fn uuid_like() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
     (0..16).map(|_| format!("{:02x}", rng.gen::<u8>())).collect()
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+    use crate::vault::crypto;
+
+    /// 移出还原回环：存入记录加密原始路径 → 还原到原位置（内容一致、密文删除、记录删除）
+    #[test]
+    fn restore_roundtrip_to_original_location() {
+        let base = std::env::temp_dir().join(format!("ff-restore-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let db = Db::open(base.join("t.db")).unwrap();
+
+        create(&db, "test-password", None, "").unwrap();
+        let key = match unlock(&db, "test-password").unwrap() {
+            VaultState::Unlocked { key } => key,
+            _ => panic!("unlock"),
+        };
+        // 模拟 0.1.9 存入条目：名称/内容/原始路径都以主密钥加密
+        let orig_dir = base.join("docs").join("sub"); // 故意多级，验证目录自动重建
+        let orig_full = orig_dir.join("report.txt");
+        let enc_name = crypto::encrypt_with_key(b"report.txt", &key).unwrap();
+        let enc_orig = crypto::encrypt_with_key(orig_full.to_str().unwrap().as_bytes(), &key).unwrap();
+        let blob = crypto::encrypt_with_key(b"hello restore", &key).unwrap();
+        let p = base.join("a.ffb");
+        std::fs::write(&p, &blob).unwrap();
+        db.conn.lock().execute(
+            "INSERT INTO vault_items(enc_name, enc_path, enc_orig_path, added_at) VALUES(?1,?2,?3,strftime('%s','now'))",
+            params![enc_name, p.to_string_lossy(), enc_orig],
+        ).unwrap();
+
+        let restored = restore_item(&db, 1, &key).unwrap();
+        assert_eq!(restored, orig_full.to_string_lossy());
+        assert_eq!(std::fs::read(&restored).unwrap(), b"hello restore");
+        // 密文与记录已删除
+        assert!(!p.exists());
+        assert_eq!(list_items(&db, &key).unwrap().len(), 0);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 原位置已有同名文件 → 自动加序号 report (1).txt，不覆盖
+    #[test]
+    fn restore_dedupes_name_conflict() {
+        let base = std::env::temp_dir().join(format!("ff-restore-dup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let db = Db::open(base.join("t.db")).unwrap();
+
+        create(&db, "test-password", None, "").unwrap();
+        let key = match unlock(&db, "test-password").unwrap() {
+            VaultState::Unlocked { key } => key,
+            _ => panic!("unlock"),
+        };
+        let orig_full = base.join("report.txt");
+        std::fs::write(&orig_full, b"existing").unwrap(); // 占位同名文件
+        let enc_name = crypto::encrypt_with_key(b"report.txt", &key).unwrap();
+        let enc_orig = crypto::encrypt_with_key(orig_full.to_str().unwrap().as_bytes(), &key).unwrap();
+        let blob = crypto::encrypt_with_key(b"from vault", &key).unwrap();
+        let p = base.join("a.ffb");
+        std::fs::write(&p, &blob).unwrap();
+        db.conn.lock().execute(
+            "INSERT INTO vault_items(enc_name, enc_path, enc_orig_path, added_at) VALUES(?1,?2,?3,strftime('%s','now'))",
+            params![enc_name, p.to_string_lossy(), enc_orig],
+        ).unwrap();
+
+        let restored = restore_item(&db, 1, &key).unwrap();
+        assert!(restored.ends_with("report (1).txt"), "实际: {}", restored);
+        assert_eq!(std::fs::read(&restored).unwrap(), b"from vault");
+        assert_eq!(std::fs::read(&orig_full).unwrap(), b"existing"); // 原文件未被覆盖
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 旧版条目（无 enc_orig_path）→ 明确报错且不删任何数据
+    #[test]
+    fn restore_rejects_legacy_item_without_origin() {
+        let base = std::env::temp_dir().join(format!("ff-restore-legacy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let db = Db::open(base.join("t.db")).unwrap();
+
+        create(&db, "test-password", None, "").unwrap();
+        let key = match unlock(&db, "test-password").unwrap() {
+            VaultState::Unlocked { key } => key,
+            _ => panic!("unlock"),
+        };
+        let enc_name = crypto::encrypt_with_key(b"note.txt", &key).unwrap();
+        let blob = crypto::encrypt_with_key(b"legacy", &key).unwrap();
+        let p = base.join("a.ffb");
+        std::fs::write(&p, &blob).unwrap();
+        db.conn.lock().execute(
+            "INSERT INTO vault_items(enc_name, enc_path, enc_orig_path, added_at) VALUES(?1,?2,NULL,strftime('%s','now'))",
+            params![enc_name, p.to_string_lossy()],
+        ).unwrap();
+
+        let err = restore_item(&db, 1, &key).unwrap_err();
+        assert!(err.contains("未记录原始位置"), "实际: {}", err);
+        // 数据完好：密文还在、条目还在
+        assert!(p.exists());
+        assert_eq!(list_items(&db, &key).unwrap().len(), 1);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }
 
 #[cfg(test)]

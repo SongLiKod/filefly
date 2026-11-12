@@ -73,7 +73,7 @@ export const SpecialView: React.FC<{ path: string }> = ({ path }) => {
             }))
           );
         } else if (path.startsWith("__category__:")) {
-          const key = path.slice(12);
+          const key = path.slice("__category__:".length); // 前缀实长 13（此前 slice(12) 多留冒号 → 后端报"未知分类：:image"）
           setTitle(CATEGORY_LABELS[key] ?? key);
           // 专用分类命令：索引可用走索引（ext 不区分大小写），否则真实文件系统扫描——与首页统计同源
           const home = useApp.getState().specialDirs?.home ?? "";

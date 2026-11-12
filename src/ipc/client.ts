@@ -87,7 +87,7 @@ export const api = {
   previewExif: (path: string) => invoke<import("./types").ExifData>("preview_exif", { path }),
   previewMediaMeta: (path: string) => invoke<import("./types").MediaMeta>("preview_media_meta", { path }),
   previewOffice: (path: string) =>
-    invoke<{ kind: string; paragraphs?: string[]; docParagraphs?: { text: string; images: string[] }[]; sheets?: [string, string[][]][]; slideCount?: number; slides?: { index: number; title: string; texts: string[]; images?: string[] }[] }>(
+    invoke<{ kind: string; paragraphs?: string[]; docParagraphs?: { text: string; images: string[] }[]; sheets?: [string, string[][]][]; slideCount?: number; slides?: { index: number; title: string; texts: string[]; images?: string[]; bgCss?: string; bgImage?: string; bgDark?: boolean }[] }>(
       "preview_office", { path }
     ),
   vaultStatus: () => invoke<import("./types").VaultStatus>("vault_status"),
@@ -100,6 +100,7 @@ export const api = {
   vaultOpen: (id: number) => invoke<string>("vault_open", { id }),
   vaultAdd: (paths: string[]) => invoke<[number, string[]]>("vault_add", { paths }),
   vaultRemove: (id: number) => invoke("vault_remove", { id }),
+  vaultRestore: (id: number) => invoke<string>("vault_restore", { id }),
   vaultVerifySecond: (password: string) => invoke<boolean>("vault_verify_second", { password }),
   vaultSetSecond: (newSecond?: string) => invoke<void>("vault_set_second", { newSecond: newSecond ?? null }),
   vaultChangePassword: (oldPassword: string, newPassword: string) =>

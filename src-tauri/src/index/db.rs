@@ -111,6 +111,7 @@ impl Db {
               id INTEGER PRIMARY KEY,
               enc_name BLOB NOT NULL,
               enc_path BLOB NOT NULL,
+              enc_orig_path BLOB,
               added_at INTEGER
             );
 
@@ -132,6 +133,9 @@ impl Db {
               ('青', '#00B8C4', 5), ('蓝', '#2E6BE6', 6), ('紫', '#8E4EC6', 7), ('灰', '#8B8D98', 8);
             "#,
         )?;
+        // 旧库迁移：vault_items 补 enc_orig_path 列（移出到原位置功能，0.1.9）；
+        // 已有该列时 ALTER 报 duplicate column，忽略即可（幂等）
+        let _ = conn.execute_batch("ALTER TABLE vault_items ADD COLUMN enc_orig_path BLOB;");
         Ok(())
     }
 

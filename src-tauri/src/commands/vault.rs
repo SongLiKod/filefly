@@ -151,6 +151,22 @@ pub async fn vault_remove(id: i64, state: S<'_>) -> Result<(), String> {
         .map_err(|e| e.to_string())?
 }
 
+/// 移出还原（0.1.9）：解密写回存入时的原始位置，成功后删除密文条目；返回还原后的实际路径
+#[tauri::command]
+pub async fn vault_restore(id: i64, state: S<'_>) -> Result<String, String> {
+    let key = {
+        let v = state.vault.lock();
+        match &*v {
+            crate::vault::box_::VaultState::Unlocked { key } => *key,
+            _ => return Err("VAULT_LOCKED".into()),
+        }
+    };
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || crate::vault::box_::restore_item(&db, id, &key))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// 打开条目：解密导出到临时目录（解锁后，用主密钥），返回导出文件路径
 #[tauri::command]
 pub async fn vault_open(id: i64, state: S<'_>) -> Result<String, String> {

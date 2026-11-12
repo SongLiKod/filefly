@@ -15,36 +15,56 @@ export const PreviewOverlay: React.FC = () => {
   const path = paths[index] ?? "";
   const name = path.split(/[\\/]/).pop() ?? "";
   const ext = name.includes(".") ? name.split(".").pop()!.toLowerCase() : "";
+  // 全屏（覆盖整个窗口）：所有预览类型共用此容器，一处开关全部生效
+  const [fs, setFs] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { e.stopPropagation(); close(); }
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        // 分级退出：全屏先回普通预览，再次 Esc 才关闭浮层
+        if (fs) setFs(false);
+        else close();
+      }
       else if (e.key === "ArrowLeft") step(-1);
       else if (e.key === "ArrowRight") step(1);
+      else if (e.key === "F11") { e.preventDefault(); setFs((v) => !v); }
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [open, close, step]);
+  }, [open, close, step, fs]);
+
+  // 切换文件 / 关闭浮层时复位全屏
+  useEffect(() => { setFs(false); }, [open, path]);
 
   if (!open || !path) return null;
   return (
     <div className="preview-overlay" style={{ position: "fixed", inset: 0, zIndex: 800 }}>
-      {/* 预览蒙层（毛玻璃，技术文档 §8.1） */}
+      {/* 预览蒙层（毛玻璃，技术文档 §8.1）；全屏时被面板完全覆盖不显示 */}
       <div className="glass" style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,.55)" }} onClick={close} />
       <div
         style={{
-          position: "absolute", inset: "4vh 6vw", display: "flex", borderRadius: 12, overflow: "hidden",
+          position: "absolute", inset: fs ? 0 : "4vh 6vw", display: "flex",
+          borderRadius: fs ? 0 : 12, overflow: "hidden",
           background: "var(--ff-bg-card)", border: "1px solid var(--ff-border)", boxShadow: "0 24px 80px rgba(0,0,0,.4)",
         }}
       >
         <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px", borderBottom: "1px solid var(--ff-border)" }}>
+          <div
+            style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px", borderBottom: "1px solid var(--ff-border)", cursor: "default" }}
+            onDoubleClick={() => setFs((v) => !v)}
+          >
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <strong style={{ fontSize: 14 }}>{name}</strong>
               <span style={{ fontSize: 12, color: "var(--ff-text-secondary)" }}>{index + 1} / {paths.length}</span>
             </div>
-            <button className="btn-ghost" onClick={close}><Icons.Close /></button>
+            <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <button className="btn-ghost" title={fs ? "退出全屏（F11 / 双击标题栏）" : "全屏预览（F11 / 双击标题栏）"} onClick={() => setFs((v) => !v)}>
+                {fs ? <Icons.Minimize /> : <Icons.Maximize />}
+              </button>
+              <button className="btn-ghost" title="关闭预览（Esc）" onClick={close}><Icons.Close /></button>
+            </div>
           </div>
           <div style={{ flex: 1, minHeight: 0 }}>
             {/* 预览内容单独包错误边界：内部崩溃只关浮层回主界面，绝不波及整个应用 */}
@@ -305,10 +325,39 @@ const ExifItem: React.FC<{ k: string; v?: string }> = ({ k, v }) => (
   <div><span style={{ color: "var(--ff-text-secondary)" }}>{k}</span><div style={{ color: v ? undefined : "var(--ff-text-disabled)" }}>{v ?? "—"}</div></div>
 );
 
+// —— 文本类预览缩放（与 PDF 观感一致：± 按钮 / 百分比 / Ctrl+滚轮 / 复位）——
+const clampZoom = (z: number) => Math.min(3, Math.max(0.5, Math.round(z * 100) / 100));
+const ZoomBar: React.FC<{ zoom: number; onChange: (z: number) => void }> = ({ zoom, onChange }) => (
+  <div style={{ position: "absolute", right: 14, bottom: 14, display: "flex", alignItems: "center", gap: 2, background: "var(--ff-bg-card)", border: "1px solid var(--ff-border)", borderRadius: 8, padding: "2px 6px", boxShadow: "0 4px 14px rgba(0,0,0,.18)", zIndex: 6 }}>
+    <button className="btn-ghost" title="缩小（Ctrl+滚轮）" onClick={() => onChange(clampZoom(zoom - 0.25))}><Icons.ZoomOut /></button>
+    <span style={{ fontSize: 12, color: "var(--ff-text-secondary)", minWidth: 46, textAlign: "center" }}>{Math.round(zoom * 100)}%</span>
+    <button className="btn-ghost" title="放大（Ctrl+滚轮）" onClick={() => onChange(clampZoom(zoom + 0.25))}><Icons.ZoomIn /></button>
+    <button className="btn-ghost" title="复位 100%" onClick={() => onChange(1)}><span style={{ fontSize: 12 }}>1:1</span></button>
+  </div>
+);
+// Ctrl+滚轮缩放：原生非 passive 监听才能 preventDefault（否则触发 webview 页面缩放）
+function useCtrlWheelZoom(ref: React.RefObject<HTMLElement | null>, zoom: number, onChange: (z: number) => void) {
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      onChange(clampZoom(zoom * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [ref, zoom, onChange]);
+}
+
 // —— 代码/文本预览（F-15：语法高亮、行号、大文件流式）——
 const CodePre: React.FC<{ path: string }> = ({ path }) => {
   const [code, setCode] = useState<CodePreview | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [zoom, setZoom] = useState(1);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  useCtrlWheelZoom(scrollRef, zoom, setZoom);
+  useEffect(() => { setZoom(1); }, [path]);
   useEffect(() => {
     let alive = true;
     setCode(null);
@@ -344,7 +393,8 @@ const CodePre: React.FC<{ path: string }> = ({ path }) => {
     keyword: "#C678DD", string: "#98C379", number: "#D19A66", comment: "#5C6370", function: "#61AFEF",
   };
   return (
-    <div style={{ height: "100%", overflow: "auto", background: "var(--ff-bg-app)", fontFamily: "var(--ff-font-mono, 'Cascadia Code', monospace)", fontSize: 13, lineHeight: 1.6 }}>
+    <div style={{ position: "relative", height: "100%" }}>
+    <div ref={scrollRef} style={{ height: "100%", overflow: "auto", zoom, background: "var(--ff-bg-app)", fontFamily: "var(--ff-font-mono, 'Cascadia Code', monospace)", fontSize: 13, lineHeight: 1.6 }}>
       {code.truncated && <div style={{ padding: "6px 14px", fontSize: 12, color: "var(--ff-warning)", background: "var(--ff-bg-card)" }}>大文件，仅加载前 {fmtSize(code.totalSize)}（流式加载）</div>}
       <div style={{ padding: "12px 0" }}>
         {lines.map((line, i) => (
@@ -363,6 +413,8 @@ const CodePre: React.FC<{ path: string }> = ({ path }) => {
       <div style={{ padding: "4px 14px 10px", fontSize: 11, color: "var(--ff-text-disabled)" }}>
         {code.language} · {code.lineCount} 行{code.text.split("\n").length > MAX_ROWS ? `（仅显示前 ${MAX_ROWS} 行）` : ""} · Tree-sitter/Shiki 高亮管线（Rust token 流）
       </div>
+    </div>
+    <ZoomBar zoom={zoom} onChange={setZoom} />
     </div>
   );
 };
@@ -456,8 +508,12 @@ const PdfPre: React.FC<{ path: string }> = ({ path }) => {
 
 // —— Office 只读预览（P1，docx/doc/xlsx/pptx）——
 const OfficePre: React.FC<{ path: string }> = ({ path }) => {
-  const [data, setData] = useState<{ kind: string; paragraphs?: string[]; docParagraphs?: { text: string; images: string[] }[]; sheets?: [string, string[][]][]; slideCount?: number; slides?: { index: number; title: string; texts: string[]; images?: string[] }[] } | null>(null);
+  const [data, setData] = useState<{ kind: string; paragraphs?: string[]; docParagraphs?: { text: string; images: string[] }[]; sheets?: [string, string[][]][]; slideCount?: number; slides?: { index: number; title: string; texts: string[]; images?: string[]; bgCss?: string; bgImage?: string; bgDark?: boolean }[] } | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [zoom, setZoom] = useState(1);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  useCtrlWheelZoom(scrollRef, zoom, setZoom);
+  useEffect(() => { setZoom(1); }, [path]);
   useEffect(() => {
     let alive = true;
     // 看门狗：解析 20s 未返回就显式报错，绝不无限停留在"解析中"
@@ -478,7 +534,8 @@ const OfficePre: React.FC<{ path: string }> = ({ path }) => {
   );
   if (!data) return <Centered>解析中…</Centered>;
   return (
-    <div style={{ height: "100%", overflow: "auto", padding: 24, fontSize: 14, lineHeight: 1.8 }}>
+    <div style={{ position: "relative", height: "100%" }}>
+    <div ref={scrollRef} style={{ height: "100%", overflow: "auto", zoom, padding: 24, fontSize: 14, lineHeight: 1.8 }}>
       {(data.kind === "docx" || data.kind === "doc") && (data.docParagraphs ?? (data.paragraphs ?? []).map((t) => ({ text: t, images: [] }))).slice(0, MAX_DOC_PARAS).map((p, i) => (
         <div key={i}>
           {p.text && <p style={{ margin: "8px 0", whiteSpace: "pre-wrap" }}>{p.text}</p>}
@@ -525,8 +582,13 @@ const OfficePre: React.FC<{ path: string }> = ({ path }) => {
                 width: "min(760px, 100%)", aspectRatio: "16 / 9", flexShrink: 0,
                 borderRadius: 12, padding: "26px 36px", overflow: "hidden",
                 display: "flex", flexDirection: "column",
-                background: "linear-gradient(135deg, #16324f 0%, #1d4ed8 130%)",
-                color: "#f8fafc", boxShadow: "0 10px 30px rgba(0,0,0,.28)",
+                // 该页真实背景（页→版式→母版继承解析）：背景图 > 纯色/渐变 > 默认渐变
+                background: s.bgImage
+                  ? `url("${convertFileSrc(s.bgImage)}") center / cover no-repeat`
+                  : (s.bgCss || "linear-gradient(135deg, #16324f 0%, #1d4ed8 130%)"),
+                color: s.bgImage ? "#f8fafc" : (s.bgDark === false ? "#1f2937" : "#f8fafc"),
+                textShadow: s.bgImage ? "0 1px 4px rgba(0,0,0,.75)" : undefined,
+                boxShadow: "0 10px 30px rgba(0,0,0,.28)",
                 border: "1px solid rgba(255,255,255,.08)",
               }}>
                 <div style={{ fontSize: 11, opacity: 0.65, letterSpacing: 1, marginBottom: 8 }}>
@@ -566,6 +628,8 @@ const OfficePre: React.FC<{ path: string }> = ({ path }) => {
         )
       )}
     </div>
+    <ZoomBar zoom={zoom} onChange={setZoom} />
+    </div>
   );
 };
 
@@ -588,7 +652,11 @@ const MdPre: React.FC<{ path: string }> = ({ path }) => {
   const [text, setText] = useState<string | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [mode, setMode] = useState<"rendered" | "source">("rendered");
+  const [zoom, setZoom] = useState(1);
   const bodyRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  useCtrlWheelZoom(scrollRef, zoom, setZoom);
+  useEffect(() => { setZoom(1); }, [path]);
   useEffect(() => {
     let alive = true;
     setText(null);
@@ -649,7 +717,7 @@ const MdPre: React.FC<{ path: string }> = ({ path }) => {
   );
   if (text === null) return <Centered>加载中…</Centered>;
   return (
-    <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+    <div style={{ position: "relative", height: "100%", display: "flex", flexDirection: "column" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 14px", borderBottom: "1px solid var(--ff-border)", background: "var(--ff-bg-card)" }}>
         <div style={{ display: "flex", background: "var(--ff-bg-app)", borderRadius: 8, padding: 2 }}>
           {(["rendered", "source"] as const).map((m) => (
@@ -669,10 +737,11 @@ const MdPre: React.FC<{ path: string }> = ({ path }) => {
         <span style={{ fontSize: 12, color: "var(--ff-text-disabled)" }}>Markdown</span>
       </div>
       {mode === "source" ? (
-        <div style={{ flex: 1, minHeight: 0, overflow: "auto", background: "var(--ff-bg-app)", padding: "16px 20px", fontFamily: "var(--ff-font-mono, 'Cascadia Code', monospace)", fontSize: 13, lineHeight: 1.7, whiteSpace: "pre-wrap" }}>{text}</div>
+        <div ref={scrollRef} style={{ flex: 1, minHeight: 0, overflow: "auto", zoom, background: "var(--ff-bg-app)", padding: "16px 20px", fontFamily: "var(--ff-font-mono, 'Cascadia Code', monospace)", fontSize: 13, lineHeight: 1.7, whiteSpace: "pre-wrap" }}>{text}</div>
       ) : (
-        <div ref={bodyRef} className="md-body" style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "20px 28px", fontSize: 14, lineHeight: 1.8 }} dangerouslySetInnerHTML={{ __html: html }} />
+        <div ref={bodyRef} className="md-body" style={{ flex: 1, minHeight: 0, overflow: "auto", zoom, padding: "20px 28px", fontSize: 14, lineHeight: 1.8 }} dangerouslySetInnerHTML={{ __html: html }} />
       )}
+      <ZoomBar zoom={zoom} onChange={setZoom} />
     </div>
   );
 };

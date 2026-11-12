@@ -267,7 +267,14 @@ export const VaultView: React.FC = () => {
         {items.map((it) => (
           <div key={it.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", borderRadius: 8, background: "var(--ff-bg-card)", border: "1px solid var(--ff-border)" }}>
             <Icons.Lock size={14} />
-            <span style={{ flex: 1 }}>{it.name}</span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.name}</div>
+              {it.origPath && (
+                <div style={{ fontSize: 11, color: "var(--ff-text-disabled)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={it.origPath}>
+                  原位置：{it.origPath}
+                </div>
+              )}
+            </div>
             <span style={{ fontSize: 12, color: "var(--ff-text-disabled)" }}>{fmtDate(it.addedAt * 1000)}</span>
             <button className="btn-ghost" onClick={async () => {
               try {
@@ -285,7 +292,20 @@ export const VaultView: React.FC = () => {
               } catch (e) { await alertDialog("打开失败", String(e).replace(/^Error: /, ""), "error"); }
             }}>打开</button>
             <button className="btn-ghost" onClick={async () => {
-              const ok = await confirmDialog("移出保险箱", `确定将「${it.name}」从保险箱移除吗？加密文件将被删除。`, { danger: true, confirmText: "移除" });
+              if (!it.origPath) {
+                await alertDialog("无法自动还原", "该条目在旧版本存入，未记录原始位置。可先「打开」后另存到需要的位置。", "info");
+                return;
+              }
+              const ok = await confirmDialog("移出保险箱", `将「${it.name}」解密还原到原位置：\n${it.origPath}\n\n目标位置已有同名文件时自动加序号（如 名 (1).txt），确定移出吗？`, { confirmText: "移出" });
+              if (!ok) return;
+              try {
+                const dest = await api.vaultRestore(it.id);
+                await alertDialog("移出成功", `已还原到：\n${dest}`, "success");
+                await refresh();
+              } catch (e) { await alertDialog("移出失败", String(e).replace(/^Error: /, ""), "error"); }
+            }}>移出</button>
+            <button className="btn-ghost" onClick={async () => {
+              const ok = await confirmDialog("删除条目", `确定将「${it.name}」从保险箱删除吗？加密文件将被删除，不会还原到原位置。`, { danger: true, confirmText: "删除" });
               if (!ok) return;
               await api.vaultRemove(it.id);
               await refresh();

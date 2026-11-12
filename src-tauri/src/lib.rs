@@ -171,6 +171,7 @@ pub fn run() {
             commands::vault::vault_list,
             commands::vault::vault_add,
             commands::vault::vault_remove,
+            commands::vault::vault_restore,
             commands::vault::vault_open,
             commands::vault::vault_verify_second,
             commands::vault::vault_set_second,

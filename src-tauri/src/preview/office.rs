@@ -42,6 +42,7 @@ pub struct OfficePreview {
 
 /// pptx 单页解析结果：标题（占位符 type=title/ctrTitle）+ 正文段落（按页内出现顺序）
 /// images：该页内嵌图片已提取到临时缓存的绝对路径（前端经 asset 协议显示）
+/// bgCss/bgImage/bgDark：该页真实背景（页→版式→母版逐级继承解析），None = 未识别用默认
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlidePreview {
@@ -49,6 +50,12 @@ pub struct SlidePreview {
     pub title: String,
     pub texts: Vec<String>,
     pub images: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bg_css: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bg_image: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bg_dark: Option<bool>,
 }
 
 /// 读取 zip 内成员字节
@@ -253,6 +260,12 @@ pub fn parse_office(path: &str) -> Result<OfficePreview, String> {
                 path,
                 std::fs::metadata(p).map(|m| m.len().to_string()).unwrap_or_default()
             );
+            // 主题色板（背景/渐变常用 schemeClr 引用主题色，如 accent1/bg1）
+            let theme_xml = read_member(&mut arch, "ppt/theme/theme1.xml")
+                .ok()
+                .map(|b| String::from_utf8_lossy(&b).to_string())
+                .unwrap_or_default();
+            let theme = parse_theme_colors(&theme_xml);
             let mut slides = Vec::new();
             for (num, name) in members {
                 let raw = match read_member(&mut arch, &name) { Ok(r) => r, Err(_) => continue };
@@ -281,7 +294,9 @@ pub fn parse_office(path: &str) -> Result<OfficePreview, String> {
                     (title, texts)
                 };
                 let images = extract_slide_images(&mut arch, &xml, num, &cache_root, &source_key);
-                slides.push(SlidePreview { index: num as usize, title, texts, images });
+                // 该页真实背景（页 → 版式 → 母版逐级继承；含主题色解析）
+                let (bg_css, bg_image, bg_dark) = slide_background(&mut arch, &xml, num, &cache_root, &source_key, &theme, &theme_xml);
+                slides.push(SlidePreview { index: num as usize, title, texts, images, bg_css, bg_image, bg_dark });
             }
             let slide_count = slides.len();
             Ok(OfficePreview { kind: "pptx".into(), paragraphs: vec![], doc_paragraphs: vec![], sheets: vec![], slide_count, slides })
@@ -356,6 +371,302 @@ fn resolve_zip_member(base: &str, target: &str) -> String {
         }
     }
     stack.join("/")
+}
+
+// ===================== pptx 幻灯片背景解析（0.1.11） =====================
+
+/// 解析 .rels：id → (Type 尾段, Target)
+fn parse_rels_typed<R: Read + std::io::Seek>(
+    arch: &mut zip::ZipArchive<R>,
+    rels_member: &str,
+) -> std::collections::HashMap<String, (String, String)> {
+    let mut map = std::collections::HashMap::new();
+    if let Ok(r) = read_member(arch, rels_member) {
+        let s = String::from_utf8_lossy(&r).to_string();
+        for rel in split_tags(&s, "<Relationship ", "/>") {
+            let id = extract_all(rel, "Id=\"", "\"").into_iter().next().unwrap_or_default();
+            let ty = extract_all(rel, "Type=\"", "\"").into_iter().next().unwrap_or_default();
+            let target = extract_all(rel, "Target=\"", "\"").into_iter().next().unwrap_or_default();
+            if !id.is_empty() && !target.is_empty() { map.insert(id, (ty, target)); }
+        }
+    }
+    map
+}
+
+/// 成员对应的 .rels 路径（ppt/slides/slide1.xml → ppt/slides/_rels/slide1.xml.rels）
+fn rels_path_for(member: &str) -> String {
+    let (dir, file) = member.rsplit_once('/').unwrap_or(("", member));
+    if dir.is_empty() { format!("_rels/{}.rels", file) } else { format!("{}/_rels/{}.rels", dir, file) }
+}
+
+/// 成员所在目录（rel target 的相对基准）
+fn base_dir_of(member: &str) -> &str {
+    member.rsplit_once('/').map(|(d, _)| d).unwrap_or("")
+}
+
+/// 主题 clrScheme：slot 名 → #RRGGBB（srgbClr 优先，sysClr 取 lastClr）
+fn parse_theme_colors(theme_xml: &str) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    for slot in ["dk1", "lt1", "dk2", "lt2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"] {
+        let seg = match seg_of(theme_xml, &format!("<a:{}>", slot), &format!("</a:{}>", slot)) {
+            Some(s) => s,
+            None => continue,
+        };
+        let color = if seg.contains("<a:srgbClr") {
+            extract_all(seg, "val=\"", "\"").into_iter().next()
+        } else {
+            extract_all(seg, "lastClr=\"", "\"").into_iter().next()
+        };
+        if let Some(c) = color { out.insert(slot.to_string(), format!("#{}", c.to_uppercase())); }
+    }
+    out
+}
+
+/// 母版 clrMap：bg1→lt1 / tx1→dk1 等映射（schemeClr 间接引用主题色的桥）
+fn parse_clr_map(master_xml: &str) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    if let Some(p) = master_xml.find("<p:clrMap") {
+        let seg = &master_xml[p..(p + 500).min(master_xml.len())];
+        let seg = &seg[..seg.find('>').unwrap_or(seg.len())];
+        for pair in seg.split_whitespace().skip(1) {
+            if let Some((k, v)) = pair.split_once("=\"") {
+                out.insert(k.to_string(), v.trim_end_matches('"').to_string());
+            }
+        }
+    }
+    out
+}
+
+/// schemeClr val（bg1/accent1/...）→ 主题 #RRGGBB
+fn resolve_scheme_color(
+    val: &str,
+    theme: &std::collections::HashMap<String, String>,
+    clr_map: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    let name = clr_map.get(val).cloned().unwrap_or_else(|| val.to_string());
+    theme.get(&name).cloned().or_else(|| theme.get(val).cloned())
+}
+
+/// 依次收集 fill 内的颜色（srgbClr 直接取值；schemeClr 经 clrMap+主题解析）
+fn collect_fill_colors(
+    xml: &str,
+    theme: &std::collections::HashMap<String, String>,
+    clr_map: &std::collections::HashMap<String, String>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    while pos < xml.len() {
+        let rest = &xml[pos..];
+        let a = rest.find("<a:srgbClr");
+        let b = rest.find("<a:schemeClr");
+        let use_srgb = match (a, b) {
+            (None, None) => break,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (Some(x), Some(y)) => x < y,
+        };
+        let (at, tag_len) = if use_srgb { (pos + a.unwrap(), 10) } else { (pos + b.unwrap(), 13) };
+        let seg = &xml[at..(at + 160).min(xml.len())]; // val 属性紧跟标签名，窗口足够
+        let color = extract_all(seg, "val=\"", "\"").into_iter().next().map(|v| {
+            if use_srgb { format!("#{}", v.to_uppercase()) } else { v }
+        });
+        match color {
+            Some(c) if use_srgb => out.push(c),
+            Some(v) => {
+                if let Some(c) = resolve_scheme_color(&v, theme, clr_map) { out.push(c); }
+            }
+            None => {}
+        }
+        pos = at + tag_len;
+    }
+    out
+}
+
+/// #RRGGBB 亮度（< 0.45 视为深色背景，前端据此选浅色/深色文字）
+fn is_dark_color(hex: &str) -> bool {
+    let h = hex.trim_start_matches('#');
+    if h.len() < 6 { return true; }
+    let n = |s: &str| u32::from_str_radix(s, 16).unwrap_or(0);
+    let (r, g, b) = (n(&h[0..2]), n(&h[2..4]), n(&h[4..6]));
+    (0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32) / 255.0 < 0.45
+}
+
+/// 单个 bg 元素解析：图片填充 → 渐变 → 纯色 → bgRef 主题背景样式引用；
+/// 返回 (css, 图片 rel-id, 深色标记)。Err 分支复用为 "图片 rid"
+fn parse_bg_element(
+    bg: &str,
+    theme: &std::collections::HashMap<String, String>,
+    clr_map: &std::collections::HashMap<String, String>,
+    theme_xml: &str,
+) -> Option<std::result::Result<(Option<String>, Option<String>, Option<bool>), String>> {
+    // 图片填充（背景图）：返回 r:embed 供调用方按所在层 rels 解析
+    if let Some(seg) = seg_of(bg, "<a:blipFill", "</a:blipFill>") {
+        if let Some(rid) = extract_all(seg, "r:embed=\"", "\"").into_iter().next() {
+            return Some(Err(rid));
+        }
+    }
+    if let Some(seg) = seg_of(bg, "<a:gradFill", "</a:gradFill>") {
+        let cs = collect_fill_colors(seg, theme, clr_map);
+        if cs.len() >= 2 {
+            let dark = is_dark_color(&cs[0]);
+            return Some(Ok((
+                Some(format!("linear-gradient(115deg, {} 0%, {} 100%)", cs[0], cs[cs.len() - 1])),
+                None,
+                Some(dark),
+            )));
+        }
+    }
+    if let Some(seg) = seg_of(bg, "<a:solidFill", "</a:solidFill>") {
+        if let Some(c) = collect_fill_colors(seg, theme, clr_map).into_iter().next() {
+            let dark = is_dark_color(&c);
+            return Some(Ok((Some(c), None, Some(dark))));
+        }
+    }
+    // bgRef（最常见：母版/版式用 idx 引用主题 bgFillStyleLst，颜色为 phClr 占位符，
+    // 由 bgRef 内 schemeClr 提供实际色）：idx 1001..1003 → 第 1..3 个填充样式
+    if let Some(bgref) = seg_of(bg, "<p:bgRef", "</p:bgRef>") {
+        let idx: u32 = extract_all(bgref, "idx=\"", "\"").into_iter().next()
+            .and_then(|v| v.parse().ok()).unwrap_or(1001);
+        let ph = extract_all(bgref, "val=\"", "\"").into_iter().next()
+            .and_then(|v| resolve_scheme_color(&v, theme, clr_map))
+            .or_else(|| theme.get("lt1").cloned()); // 解析失败退回浅色 1
+        if let Some(ph) = ph {
+            let styles = match seg_of(theme_xml, "<a:bgFillStyleLst>", "</a:bgFillStyleLst>") {
+                Some(s) => s,
+                None => return None,
+            };
+            // 依次收集主题背景填充样式（solidFill/gradFill/blipFill）
+            let mut fills: Vec<String> = Vec::new();
+            let mut pos = 0usize;
+            while pos < styles.len() {
+                let rest = &styles[pos..];
+                let cand = [
+                    ("solidFill", rest.find("<a:solidFill")),
+                    ("gradFill", rest.find("<a:gradFill")),
+                    ("blipFill", rest.find("<a:blipFill")),
+                ].into_iter().filter_map(|(n, p)| p.map(|v| (pos + v, n))).min();
+                let (at, name) = match cand { Some(x) => x, None => break };
+                let close = format!("</a:{}>", name);
+                let seg_rest = &styles[at..];
+                let end = match seg_rest.find(&close) { Some(e) => e + close.len(), None => break };
+                fills.push(seg_rest[..end].to_string());
+                pos = at + end;
+            }
+            if fills.is_empty() { return None; }
+            let pick = fills.get((idx.min(1003).max(1001) - 1001) as usize).unwrap_or(&fills[0]);
+            // phClr 占位符替换为实际色（修饰子元素 tint/shade 等忽略，取基色）
+            let hex = ph.trim_start_matches('#');
+            let fill_xml = pick.replace("<a:schemeClr val=\"phClr\"", &format!("<a:srgbClr val=\"{}\"", hex));
+            if let Some(seg) = seg_of(&fill_xml, "<a:gradFill", "</a:gradFill>") {
+                let cs = collect_fill_colors(seg, theme, clr_map);
+                if cs.len() >= 2 {
+                    let dark = is_dark_color(&cs[0]);
+                    return Some(Ok((
+                        Some(format!("linear-gradient(115deg, {} 0%, {} 100%)", cs[0], cs[cs.len() - 1])),
+                        None,
+                        Some(dark),
+                    )));
+                }
+            }
+            if let Some(seg) = seg_of(&fill_xml, "<a:solidFill", "</a:solidFill>") {
+                if let Some(c) = collect_fill_colors(seg, theme, clr_map).into_iter().next() {
+                    let dark = is_dark_color(&c);
+                    return Some(Ok((Some(c), None, Some(dark))));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 幻灯片背景：页 → 版式 → 母版逐级继承。
+/// 返回 (css 背景值 / 背景图缓存路径, 深色标记)。图片填充用所在层自己的 rels 解析。
+fn slide_background<R: Read + std::io::Seek>(
+    arch: &mut zip::ZipArchive<R>,
+    slide_xml: &str,
+    slide_num: u32,
+    cache_root: &Path,
+    source_key: &str,
+    theme: &std::collections::HashMap<String, String>,
+    theme_xml: &str,
+) -> (Option<String>, Option<String>, Option<bool>) {
+    use std::collections::HashMap;
+    let slide_rels = parse_rels_typed(arch, &format!("ppt/slides/_rels/slide{}.xml.rels", slide_num));
+    // slide → layout → master 继承链
+    let layout_member: Option<String> = slide_rels.values()
+        .find(|(t, _)| t.ends_with("/slideLayout"))
+        .map(|(_, target)| resolve_zip_member("ppt/slides", target));
+    let layout_xml = layout_member.as_ref().and_then(|m| read_member(arch, m).ok())
+        .map(|b| String::from_utf8_lossy(&b).to_string()).unwrap_or_default();
+    let layout_rels = layout_member.as_ref()
+        .map(|m| parse_rels_typed(arch, &rels_path_for(m)))
+        .unwrap_or_default();
+    let master_member: Option<String> = layout_rels.values()
+        .find(|(t, _)| t.ends_with("/slideMaster"))
+        .map(|(_, target)| resolve_zip_member("ppt/slideLayouts", target));
+    let master_xml = master_member.as_ref().and_then(|m| read_member(arch, m).ok())
+        .map(|b| String::from_utf8_lossy(&b).to_string()).unwrap_or_default();
+    let master_rels = master_member.as_ref()
+        .map(|m| parse_rels_typed(arch, &rels_path_for(m)))
+        .unwrap_or_default();
+    let clr_map = parse_clr_map(&master_xml);
+
+    let chain: [(String, String, &HashMap<String, (String, String)>); 3] = [
+        (slide_xml.to_string(), "ppt/slides".into(), &slide_rels),
+        (layout_xml, "ppt/slideLayouts".into(), &layout_rels),
+        (master_xml, "ppt/slideMasters".into(), &master_rels),
+    ];
+    for (xml, base, rels) in chain.into_iter() {
+        if xml.is_empty() { continue; }
+        let bg = match split_tags(&xml, "<p:bg>", "</p:bg>").next().or_else(|| split_tags(&xml, "<p:bg ", "</p:bg>").next()) {
+            Some(b) => b,
+            None => continue, // 本层无 bg → 继承上一层
+        };
+        match parse_bg_element(bg, theme, &clr_map, theme_xml) {
+            Some(Ok((css, _, dark))) => return (css, None, dark),
+            Some(Err(rid)) => {
+                if let Some((_, target)) = rels.get(&rid) {
+                    let member = resolve_zip_member(&base, target);
+                    if let Some(path) = extract_media_to_cache(arch, &member, cache_root, source_key) {
+                        return (None, Some(path), None);
+                    }
+                }
+                return (None, None, None); // 图片解压失败就不再降级
+            }
+            None => continue,
+        }
+    }
+    (None, None, None)
+}
+
+/// 单个媒体成员解压到缓存（背景图用）；不可渲染格式返回 None
+fn extract_media_to_cache<R: Read + std::io::Seek>(
+    arch: &mut zip::ZipArchive<R>,
+    member: &str,
+    cache_root: &Path,
+    source_key: &str,
+) -> Option<String> {
+    let lower = member.to_lowercase();
+    if !IMG_EXTS.iter().any(|e| lower.ends_with(&format!(".{}", e))) { return None; }
+    let bytes = read_member(arch, member).ok()?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&source_key, &mut hasher);
+    let dir = cache_root.join(format!("{}", std::hash::Hasher::finish(&hasher)));
+    let fname = member.rsplit('/').next().unwrap_or("bg.bin").to_string();
+    let dest = dir.join(&fname);
+    if !dest.exists() {
+        std::fs::create_dir_all(&dir).ok()?;
+        std::fs::write(&dest, &bytes).ok()?;
+    }
+    Some(dest.to_string_lossy().to_string())
+}
+
+/// 取 s 中第一个 open...close 段内容
+fn seg_of<'a>(s: &'a str, open: &str, close: &str) -> Option<&'a str> {
+    let start = s.find(open)? + open.len();
+    let rest = &s[start..];
+    let end = rest.find(close)?;
+    Some(&rest[..end])
 }
 
 fn extract_all(s: &str, open: &str, close: &str) -> Vec<String> {
@@ -639,6 +950,71 @@ mod tests {
         let t0 = std::time::Instant::now();
         let r = parse_office(p).expect("真实 pptx 解析失败");
         let imgs: usize = r.slides.iter().map(|s| s.images.len()).sum();
-        println!("耗时={:?} 页数={} 图片数={}", t0.elapsed(), r.slide_count, imgs);
+        let with_bg = r.slides.iter().filter(|s| s.bg_css.is_some() || s.bg_image.is_some()).count();
+        println!("耗时={:?} 页数={} 图片数={} 有背景页数={}", t0.elapsed(), r.slide_count, imgs, with_bg);
+        println!("首页背景: css={:?} image={:?} dark={:?}", r.slides[0].bg_css, r.slides[0].bg_image, r.slides[0].bg_dark);
+    }
+
+    /// 幻灯片背景解析单元：主题色板 / clrMap / schemeClr 解析 / 渐变 / 亮度判定
+    #[test]
+    fn slide_bg_parsing_units() {
+        use std::collections::HashMap;
+        let theme_xml = r#"<a:clrScheme name="Office">
+            <a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1>
+            <a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>
+            <a:accent1><a:srgbClr val="2E6BE6"/></a:accent1>
+            <a:accent2><a:srgbClr val="ED7D31"/></a:accent2>
+        </a:clrScheme>"#;
+        let theme = parse_theme_colors(theme_xml);
+        assert_eq!(theme.get("accent1").unwrap(), "#2E6BE6");
+        assert_eq!(theme.get("lt1").unwrap(), "#FFFFFF");
+        assert_eq!(theme.get("dk1").unwrap(), "#000000");
+
+        // 母版 clrMap：bg1 → lt1
+        let master = r#"<p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1"/>"#;
+        let clr = parse_clr_map(master);
+        assert_eq!(clr.get("bg1").unwrap(), "lt1");
+
+        // 纯色背景 + schemeClr（经 clrMap 解析到 lt1 = 白色，浅色）
+        let solid_bg = r#"<p:bg><p:bgPr><a:solidFill><a:schemeClr val="bg1"/></a:solidFill><a:effectLst/></p:bgPr></p:bg>"#;
+        let solid_seg = seg_of(solid_bg, "<a:solidFill", "</a:solidFill>").unwrap();
+        let colors = collect_fill_colors(solid_seg, &theme, &clr);
+        assert_eq!(colors, vec!["#FFFFFF".to_string()]);
+
+        // 渐变背景：两个 srgbClr 色标
+        let grad_bg = r#"<p:bg><p:bgPr><a:gradFill><a:gsLst><a:gs pos="0"><a:srgbClr val="16324F"/></a:gs><a:gs pos="100000"><a:srgbClr val="1D4ED8"/></a:gs></a:gsLst></a:gradFill></p:bgPr></p:bg>"#;
+        let parsed = parse_bg_element(grad_bg, &theme, &clr, "").unwrap().unwrap();
+        assert_eq!(parsed.0.as_deref(), Some("linear-gradient(115deg, #16324F 0%, #1D4ED8 100%)"));
+        assert_eq!(parsed.2, Some(true)); // 深色
+
+        // 图片填充：返回 rid
+        let pic_bg = r#"<p:bg><p:bgPr><a:blipFill><a:blip r:embed="rId2"/></a:blipFill></p:bgPr></p:bg>"#;
+        match parse_bg_element(pic_bg, &theme, &clr, "").unwrap() {
+            Err(rid) => assert_eq!(rid, "rId2"),
+            _ => panic!("应返回图片 rid"),
+        }
+
+        // bgRef（母版/版式最常见写法）：idx=1001 → 主题第 1 个填充（solidFill phClr），
+        // phClr 由 bgRef 的 schemeClr bg1（→lt1→白）替换
+        let theme_full = r#"<a:theme><a:themeElements><a:clrScheme><a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1></a:clrScheme>
+            <a:fmtScheme><a:bgFillStyleLst>
+              <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+              <a:gradFill><a:gsLst><a:gs pos="0"><a:schemeClr val="phClr"><a:tint val="93000"/></a:schemeClr></a:gs><a:gs pos="100000"><a:schemeClr val="phClr"><a:shade val="63000"/></a:schemeClr></a:gs></a:gsLst></a:gradFill>
+            </a:bgFillStyleLst></a:fmtScheme></a:themeElements></a:theme>"#;
+        let bgref_bg = r#"<p:bg><p:bgRef idx="1001"><a:schemeClr val="bg1"/></p:bgRef></p:bg>"#;
+        let parsed = parse_bg_element(bgref_bg, &theme, &clr, theme_full).unwrap().unwrap();
+        assert_eq!(parsed.0.as_deref(), Some("#FFFFFF"));
+        assert_eq!(parsed.2, Some(false)); // 白色 → 浅色背景
+
+        // bgRef idx=1002 → 渐变样式，phClr 替换后出两个色标
+        let bgref2 = r#"<p:bg><p:bgRef idx="1002"><a:schemeClr val="accent1"/></p:bgRef></p:bg>"#;
+        let parsed2 = parse_bg_element(bgref2, &theme, &clr, theme_full).unwrap().unwrap();
+        assert_eq!(parsed2.0.as_deref(), Some("linear-gradient(115deg, #2E6BE6 0%, #2E6BE6 100%)"));
+        assert_eq!(parsed2.2, Some(true));
+
+        // 亮度判定
+        assert!(is_dark_color("#16324F"));
+        assert!(!is_dark_color("#FFFFFF"));
+        assert!(!is_dark_color("#F5F5F5"));
     }
 }
