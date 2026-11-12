@@ -202,6 +202,49 @@ export interface TaggedPath {
   isDir: boolean;
 }
 
+// ---------------- 空间分析 / 清理 ----------------
+
+export interface DirStat {
+  path: string;
+  name: string;
+  size: number;
+  files: number;
+  dirs: number;
+  isDir: boolean;
+  partial: boolean;
+}
+
+export interface ScanResult {
+  root: string;
+  children: DirStat[];
+  topFiles: DirStat[];
+  totalSize: number;
+  totalFiles: number;
+  totalDirs: number;
+  scannedEntries: number;
+  cancelled: boolean;
+}
+
+export interface ScanProgress {
+  scanned: number;
+  currentPath: string;
+}
+
+export interface CleanTarget {
+  id: string;
+  name: string;
+  description: string;
+  paths: string[];
+  size: number;
+  partial: boolean;
+  cleanable: boolean;
+}
+
+export interface CleanReport {
+  freed: number;
+  failed: string[];
+}
+
 export function fmtDate(ms: number): string {
   if (!ms) return "—";
   const d = new Date(ms);

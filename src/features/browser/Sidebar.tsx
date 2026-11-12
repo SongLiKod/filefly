@@ -171,6 +171,7 @@ export const Sidebar: React.FC = () => {
         <RailBtn title="保险箱" icon={<Icons.Lock size={16} />} onClick={() => navigate("__vault__", "保险箱")} />
         <RailBtn title="回收站" icon={<Icons.Trash size={16} />} onClick={() => navigate("__trash__", "回收站")} />
         <RailBtn title="网络位置" icon={<Icons.Network size={16} />} onClick={() => navigate("__network__", "网络位置")} />
+        <RailBtn title="空间分析" icon={<Icons.Disk size={16} />} onClick={() => navigate("__space__", "空间分析")} />
         <RailBtn title="重复文件" icon={<Icons.Duplicate size={16} />} onClick={() => toggleOpen("duplicatesOpen")} />
       </div>
     );
@@ -303,6 +304,7 @@ export const Sidebar: React.FC = () => {
         <Item label="保险箱" icon={<Icons.Lock />} active={activePath === "__vault__"} onClick={() => navigate("__vault__", "保险箱")} />
         <Item label="回收站" icon={<Icons.Trash />} active={activePath === "__trash__"} onClick={() => navigate("__trash__", "回收站")} />
         <Item label="网络位置" icon={<Icons.Network />} active={activePath === "__network__"} onClick={() => navigate("__network__", "网络位置")} />
+        <Item label="空间分析" icon={<Icons.Disk />} active={activePath === "__space__"} onClick={() => navigate("__space__", "空间分析")} />
         <Item label="重复文件" icon={<Icons.Duplicate />} onClick={() => toggleOpen("duplicatesOpen")} />
       </Sec>
     </div>

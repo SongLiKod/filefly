@@ -107,6 +107,11 @@ pub fn remove_permanently(id: &str, i_path: &str) -> Result<(), String> {
     std::fs::remove_file(i_path).map_err(|e| e.to_string())
 }
 
+/// 回收站总占用（字节，各盘 $I 元数据 size 求和）
+pub fn total_size() -> Result<u64, String> {
+    Ok(list().iter().map(|it| it.size).sum())
+}
+
 /// 清空回收站（所有盘）
 pub fn empty_all() -> Result<usize, String> {
     let items = list();

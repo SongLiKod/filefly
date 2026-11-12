@@ -246,3 +246,9 @@ html[data-theme="dark"] .search-pill:focus-within { box-shadow: 0 0 0 3px rgba(7
   animation: ff-shimmer 1.2s linear infinite;
 }
 @keyframes ff-shimmer { to { background-position: -200% 0; } }
+
+/* 空间扫描不确定进度条：左右往复 */
+@keyframes ff-indeterminate {
+  0% { margin-left: -30%; }
+  100% { margin-left: 100%; }
+}

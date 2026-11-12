@@ -4,6 +4,7 @@ import { api } from "@/ipc/client";
 import type { EntryMeta, SearchHit, TrashItem, DriveInfo } from "@/ipc/types";
 import { fmtDate, fmtSize } from "@/ipc/types";
 import { FileList } from "@/features/browser/FileList";
+import { SpaceView } from "@/features/space/SpaceView";
 import { openEntrySmart } from "@/utils/openEntry";
 import { useTabs } from "@/features/tabs/tabsStore";
 import { useApp } from "@/features/settings/appStore";
@@ -108,6 +109,11 @@ export const SpecialView: React.FC<{ path: string }> = ({ path }) => {
   const open = (e: EntryMeta) => {
     void openEntrySmart(e.path, e.isDir, () => navigate(e.path));
   };
+
+  // 空间分析/清理是独立视图（有自己的扫描交互），不进入通用加载流程
+  if (path === "__space__") {
+    return <SpaceView />;
+  }
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column", background: "var(--ff-bg-content)" }}>
