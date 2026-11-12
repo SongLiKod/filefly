@@ -27,6 +27,10 @@ interface TabsState {
   navigateIn: (side: "left" | "right", path: string, title?: string) => void;
   backIn: (side: "left" | "right") => void;
   forwardIn: (side: "left" | "right") => void;
+  /** 按 tabId 定向导航（keep-alive 多实例：后台 tab 的面板内部跳转不打扰激活 tab） */
+  navigateTab: (tabId: string, path: string, title?: string) => void;
+  backTab: (tabId: string) => void;
+  forwardTab: (tabId: string) => void;
 }
 
 const mkTab = (path: string): Tab => ({
@@ -191,6 +195,36 @@ export const useTabs = create<TabsState>((set, get) => ({
     const s = get();
     return s.tabs.find((t) => t.id === s.activeTabId) ?? s.tabs[0];
   },
+  navigateTab: (tabId, path, title) =>
+    set((s) => {
+      const upd = (t: Tab): Tab => {
+        const history = [...t.history.slice(0, t.historyIndex + 1), path];
+        return {
+          ...t,
+          path,
+          title: title ?? path.split(/[\\/]/).filter(Boolean).pop() ?? "首页",
+          history,
+          historyIndex: history.length - 1,
+        };
+      };
+      return { tabs: s.tabs.map((t) => (t.id === tabId ? upd(t) : t)) };
+    }),
+  backTab: (tabId) =>
+    set((s) => ({
+      tabs: s.tabs.map((t) =>
+        t.id === tabId && t.historyIndex > 0
+          ? { ...t, historyIndex: t.historyIndex - 1, path: t.history[t.historyIndex - 1] }
+          : t,
+      ),
+    })),
+  forwardTab: (tabId) =>
+    set((s) => ({
+      tabs: s.tabs.map((t) =>
+        t.id === tabId && t.historyIndex < t.history.length - 1
+          ? { ...t, historyIndex: t.historyIndex + 1, path: t.history[t.historyIndex + 1] }
+          : t,
+      ),
+    })),
 }));
 
 // 初始化 activeTabId（若有会话恢复则指向保存时的活动标签）

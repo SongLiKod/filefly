@@ -109,9 +109,6 @@ export default function App() {
     return () => document.removeEventListener("contextmenu", onCtx);
   }, []);
 
-  // 保险箱全屏遮罩入口（§9）
-  const isVault = path === "__vault__";
-
   // 在当前浏览目录打开 CMD 终端（非真实目录时回退主目录）
   const openTerminal = async () => {
     const target = !path || path.startsWith("__") ? useApp.getState().specialDirs?.home : path;
@@ -152,25 +149,36 @@ export default function App() {
 
         <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
           <Sidebar />
-          {isVault ? (
-            <div style={{ flex: 1, minWidth: 0 }}><VaultView /></div>
-          ) : path === "__home__" || path === "" ? (
-            <div style={{ flex: 1, minWidth: 0 }}><HomePage /></div>
-          ) : path.startsWith("__search__:") ? (
-            <div style={{ flex: 1, minWidth: 0 }}><SearchResults query={path.slice(11)} /></div>
-          ) : path.startsWith("__") ? (
-            <div style={{ flex: 1, minWidth: 0 }}><SpecialView path={path} /></div>
-          ) : tabs.dualPane ? (
-            // 双栏模式（F-05）：Ctrl+Shift+D 切换，Tab 在两栏间焦点切换
-            <div style={{ display: "flex", flex: 1, minWidth: 0 }} tabIndex={0}
-              onKeyDown={(e) => { if (e.key === "Tab") e.preventDefault(); }}>
-              <BrowserPane side="left" />
-              <div style={{ width: 1, background: "var(--ff-border)" }} />
-              <BrowserPane side="right" />
-            </div>
-          ) : (
-            <div style={{ flex: 1, minWidth: 0 }}><BrowserPane side="left" /></div>
-          )}
+          {/* keep-alive：每个 tab 常驻一个视图实例，切换 tab 只切换可见性。
+              后台 tab 的搜索/扫描/列表状态不会被销毁，切换回来原样继续。 */}
+          {tabs.tabs.map((t) => {
+            const active = t.id === tabs.activeTabId;
+            const p = t.path;
+            return (
+              <div key={t.id} style={{ display: active ? "flex" : "none", flex: 1, minWidth: 0 }}>
+                {p === "__vault__" ? (
+                  <VaultView />
+                ) : p === "__home__" || p === "" ? (
+                  <HomePage />
+                ) : p.startsWith("__search__:") ? (
+                  <SearchResults query={p.slice(11)} />
+                ) : p.startsWith("__") ? (
+                  <SpecialView path={p} />
+                ) : (
+                  <div style={{ display: "flex", flex: 1, minWidth: 0 }} tabIndex={0}
+                    onKeyDown={(e) => { if (e.key === "Tab") e.preventDefault(); }}>
+                    <BrowserPane side="left" tabId={t.id} active={active} />
+                    {active && tabs.dualPane && (
+                      <>
+                        <div style={{ width: 1, background: "var(--ff-border)" }} />
+                        <BrowserPane side="right" />
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       </div>
 

@@ -18,9 +18,19 @@ const FILTERS: { key: "today" | "large" | "duplicate"; label: string }[] = [
   { key: "duplicate", label: "重复文件" },
 ];
 
-export const BrowserPane: React.FC<{ side: "left" | "right" }> = ({ side }) => {
+export const BrowserPane: React.FC<{ side: "left" | "right"; tabId?: string; active?: boolean }> = ({ side, tabId, active = true }) => {
   const tabs = useTabs();
-  const tab = side === "left" ? tabs.tabs.find((t) => t.id === tabs.activeTabId) ?? tabs.tabs[0] : tabs.rightTabs.find((t) => t.id === tabs.rightActiveTabId) ?? tabs.rightTabs[0];
+  // keep-alive 多实例：传入 tabId 时绑定到该 tab（后台 tab 常驻，切换不销毁）；否则按侧栏解析（双栏右栏）
+  const tab = tabId
+    ? tabs.tabs.find((t) => t.id === tabId) ?? tabs.tabs[0]
+    : side === "left"
+      ? tabs.tabs.find((t) => t.id === tabs.activeTabId) ?? tabs.tabs[0]
+      : tabs.rightTabs.find((t) => t.id === tabs.rightActiveTabId) ?? tabs.rightTabs[0];
+  // 面板内部导航：绑定 tabId 时定向到该 tab，不打扰激活 tab
+  const nav = (path: string, title?: string) =>
+    tabId ? tabs.navigateTab(tabId, path, title) : tabs.navigateIn(side, path, title);
+  const goBack = () => (tabId ? tabs.backTab(tabId) : tabs.backIn(side));
+  const goForward = () => (tabId ? tabs.forwardTab(tabId) : tabs.forwardIn(side));
   const [entries, setEntries] = useState<EntryMeta[]>([]);
   const [loading, setLoading] = useState(false);
   const app = useApp();
@@ -73,6 +83,7 @@ export const BrowserPane: React.FC<{ side: "left" | "right" }> = ({ side }) => {
   // 键盘操作（真实资源管理器习惯）：F2 重命名 / Delete 删除 / Ctrl+A 全选 / Enter 打开 / Backspace 上级
   useEffect(() => {
     const onKey = async (ev: KeyboardEvent) => {
+      if (!active) return; // 后台 tab 的面板不响应键盘（否则全局选区会被隐藏面板重复处理）
       const tag = (ev.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (ev.target as HTMLElement)?.isContentEditable) return;
       if (usePreview.getState().open) return; // 预览打开时按键由预览层处理
@@ -99,7 +110,7 @@ export const BrowserPane: React.FC<{ side: "left" | "right" }> = ({ side }) => {
         if (entry) openEntry(entry);
       } else if (ev.key === "Backspace" && tab && !tab.path.startsWith("__")) {
         const crumbs = tab.path.split("\\").filter(Boolean);
-        if (crumbs.length > 1) { ev.preventDefault(); tabs.navigate(crumbs.slice(0, -1).join("\\")); }
+        if (crumbs.length > 1) { ev.preventDefault(); nav(crumbs.slice(0, -1).join("\\")); }
       }
     };
     window.addEventListener("keydown", onKey);
@@ -110,7 +121,7 @@ export const BrowserPane: React.FC<{ side: "left" | "right" }> = ({ side }) => {
 
   // 真实 Windows 行为：双击目录进入；双击可执行文件（exe/msi…）直接运行安装；其余进内置 QuickLook 预览。
   const openEntry = (e: EntryMeta) => {
-    void openEntrySmart(e.path, e.isDir, () => tabs.navigateIn(side, e.path));
+    void openEntrySmart(e.path, e.isDir, () => nav(e.path));
   };
 
   const crumbs = tab.path.split("\\").filter(Boolean);
@@ -204,9 +215,9 @@ export const BrowserPane: React.FC<{ side: "left" | "right" }> = ({ side }) => {
             {side === "left" ? "左栏" : "右栏"}
           </span>
         )}
-        <button className="btn-ghost" onClick={() => tabs.backIn(side)} title="后退"><Icons.Back /></button>
-        <button className="btn-ghost" onClick={() => tabs.forwardIn(side)} title="前进"><Icons.Forward /></button>
-        <button className="btn-ghost" onClick={() => parentPath && tabs.navigateIn(side, parentPath)} title="上一级"><Icons.Up /></button>
+        <button className="btn-ghost" onClick={() => goBack()} title="后退"><Icons.Back /></button>
+        <button className="btn-ghost" onClick={() => goForward()} title="前进"><Icons.Forward /></button>
+        <button className="btn-ghost" onClick={() => parentPath && nav(parentPath)} title="上一级"><Icons.Up /></button>
         <button className="btn-ghost" onClick={load} title="刷新"><Icons.Refresh /></button>
 
         {/* 面包屑地址栏：点击编辑可输入路径；节点可接收拖放移动 */}
@@ -217,7 +228,7 @@ export const BrowserPane: React.FC<{ side: "left" | "right" }> = ({ side }) => {
             onChange={(e) => setAddrDraft(e.target.value)}
             onBlur={() => setAddrEditing(false)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && addrDraft.trim()) { setAddrEditing(false); tabs.navigateIn(side, addrDraft.trim()); }
+              if (e.key === "Enter" && addrDraft.trim()) { setAddrEditing(false); nav(addrDraft.trim()); }
               if (e.key === "Escape") setAddrEditing(false);
             }}
             style={{
@@ -240,7 +251,7 @@ export const BrowserPane: React.FC<{ side: "left" | "right" }> = ({ side }) => {
                 {i > 0 && <span style={{ color: "var(--ff-text-disabled)" }}>›</span>}
                 <span
                   style={{ cursor: "pointer", color: i === crumbs.length - 1 ? "var(--ff-text-primary)" : "var(--ff-text-secondary)", padding: "1px 4px", borderRadius: 4 }}
-                  onClick={(ev) => { ev.stopPropagation(); tabs.navigateIn(side, crumbs.slice(0, i + 1).join("\\")); }}
+                  onClick={(ev) => { ev.stopPropagation(); nav(crumbs.slice(0, i + 1).join("\\")); }}
                   {...breadcrumbDrop(crumbs.slice(0, i + 1).join("\\"))}
                 >
                   {c}
