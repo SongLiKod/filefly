@@ -2,8 +2,112 @@
 use crate::fs::{enumerate, ops};
 use tauri::{AppHandle, State};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 type S<'a> = State<'a, crate::AppState>;
+
+/// 文件夹大小缓存（5 分钟 TTL，避免同一目录反复递归扫描）
+struct DirSizeCache {
+    size: u64,
+    partial: bool,
+    at: Instant,
+}
+static DIR_SIZE_CACHE: OnceLock<Mutex<std::collections::HashMap<String, DirSizeCache>>> = OnceLock::new();
+fn dir_size_cache() -> &'static Mutex<std::collections::HashMap<String, DirSizeCache>> {
+    DIR_SIZE_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+const DIR_SIZE_TTL: Duration = Duration::from_secs(300);
+const DIR_SIZE_DEADLINE: Duration = Duration::from_secs(8); // 单文件夹计算上限
+const DIR_SIZE_ENTRY_CAP: u64 = 150_000; // 单文件夹条目上限
+const DIR_SIZE_WORKERS: usize = 8; // 批量并发线程数
+
+/// 递归统计目录占用（迭代栈遍历防爆栈；跳过符号链接防循环；超时/超量返回 partial）
+fn compute_dir_size(root: &Path, deadline: Instant) -> (u64, bool) {
+    let mut stack = vec![root.to_path_buf()];
+    let mut total = 0u64;
+    let mut count = 0u64;
+    let mut partial = false;
+    'outer: while let Some(dir) = stack.pop() {
+        let rd = match std::fs::read_dir(&dir) {
+            Ok(r) => r,
+            Err(_) => continue, // 无权限/已消失的目录静默跳过
+        };
+        for entry in rd.flatten() {
+            count += 1;
+            if count > DIR_SIZE_ENTRY_CAP || Instant::now() >= deadline {
+                partial = true;
+                break 'outer;
+            }
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_symlink() {
+                continue; // 跳过链接，防环路与重复计数
+            }
+            if ft.is_dir() {
+                stack.push(entry.path());
+            } else if let Ok(meta) = entry.metadata() {
+                total += meta.len();
+            }
+        }
+    }
+    (total, partial)
+}
+
+#[derive(serde::Serialize)]
+pub struct DirSizeInfo {
+    pub path: String,
+    pub size: u64,
+    pub partial: bool,
+}
+
+/// 批量计算文件夹大小（后台并发 + 缓存；前端仅在"显示文件夹大小"开启时调用）
+#[tauri::command]
+pub async fn fs_dir_sizes(paths: Vec<String>) -> Result<Vec<DirSizeInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut out: Vec<DirSizeInfo> = Vec::with_capacity(paths.len());
+        let mut todo: Vec<String> = Vec::new();
+        {
+            let cache = dir_size_cache().lock().unwrap();
+            for p in &paths {
+                match cache.get(p) {
+                    Some(c) if c.at.elapsed() < DIR_SIZE_TTL => {
+                        out.push(DirSizeInfo { path: p.clone(), size: c.size, partial: c.partial });
+                    }
+                    _ => todo.push(p.clone()),
+                }
+            }
+        }
+        if !todo.is_empty() {
+            let deadline = Instant::now() + DIR_SIZE_DEADLINE;
+            let next = AtomicUsize::new(0);
+            let collected: Mutex<Vec<DirSizeInfo>> = Mutex::new(Vec::new());
+            let workers = todo.len().min(DIR_SIZE_WORKERS);
+            std::thread::scope(|s| {
+                for _ in 0..workers {
+                    s.spawn(|| loop {
+                        let i = next.fetch_add(1, Ordering::SeqCst);
+                        if i >= todo.len() {
+                            break;
+                        }
+                        let p = &todo[i];
+                        let (size, partial) = compute_dir_size(Path::new(p), deadline);
+                        collected.lock().unwrap().push(DirSizeInfo { path: p.clone(), size, partial });
+                        dir_size_cache().lock().unwrap().insert(
+                            p.clone(),
+                            DirSizeCache { size, partial, at: Instant::now() },
+                        );
+                    });
+                }
+            });
+            out.extend(collected.into_inner().unwrap());
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
 
 #[tauri::command]
 pub async fn fs_list(
@@ -641,4 +745,45 @@ fn list_7z(path: &str) -> Result<Vec<ArchiveMember>, String> {
             is_dir: e.is_directory(),
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dir_size_counts_files_recursively() {
+        let tmp = std::env::temp_dir().join(format!("ff_dirsize_test_{}", std::process::id()));
+        let sub = tmp.join("nested").join("deep");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(tmp.join("a.bin"), vec![0u8; 1000]).unwrap();
+        std::fs::write(tmp.join("nested").join("b.bin"), vec![0u8; 500]).unwrap();
+        std::fs::write(sub.join("c.bin"), vec![0u8; 250]).unwrap();
+        let (size, partial) = compute_dir_size(&tmp, Instant::now() + Duration::from_secs(5));
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert_eq!(size, 1750, "应递归累计所有普通文件大小");
+        assert!(!partial);
+    }
+
+    #[test]
+    fn dir_size_empty_dir_is_zero() {
+        let tmp = std::env::temp_dir().join(format!("ff_dirsize_empty_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let (size, partial) = compute_dir_size(&tmp, Instant::now() + Duration::from_secs(5));
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert_eq!(size, 0);
+        assert!(!partial);
+    }
+
+    #[test]
+    fn dir_size_deadline_reports_partial() {
+        let tmp = std::env::temp_dir().join(format!("ff_dirsize_partial_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("x.bin"), vec![0u8; 10]).unwrap();
+        // 已过期的 deadline：应立即返回 partial=true
+        let (size, partial) = compute_dir_size(&tmp, Instant::now() - Duration::from_secs(1));
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(partial, "超时必须标记 partial");
+        assert_eq!(size, 0, "超时前未统计到任何文件");
+    }
 }

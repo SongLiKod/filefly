@@ -53,6 +53,9 @@ export const SettingsPage: React.FC = () => {
         <Row label="显示隐藏文件" hint="Ctrl+H">
           <input type="checkbox" checked={app.showHidden} onChange={(e) => app.setShowHidden(e.target.checked)} />
         </Row>
+        <Row label="文件夹大小" hint="详情/列表视图中显示文件夹占用（后台异步计算：并发+5分钟缓存+8秒超时，不影响浏览流畅度）；关闭后不显示也不再计算">
+          <input type="checkbox" checked={app.folderSize} onChange={(e) => app.setFolderSize(e.target.checked)} />
+        </Row>
       </Section>
 
       <Section title="启动">

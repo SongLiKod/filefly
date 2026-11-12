@@ -29,6 +29,17 @@ function fileIcon(e: EntryMeta, size: number) {
 
 const THUMB_CACHE = new Map<string, string>();
 
+// 文件夹大小：会话级缓存（后端另有 5 分钟 TTL 缓存），in-flight 去重避免重复请求
+const DIR_SIZE_MEMO = new Map<string, { size: number; partial: boolean }>();
+const DIR_SIZE_INFLIGHT = new Set<string>();
+
+/** 文件夹大小显示：未知=…；空文件夹=0 KB；截断=≥ 前缀 */
+function dirSizeText(v: { size: number; partial: boolean } | undefined): string {
+  if (!v) return "…";
+  if (v.size === 0) return "0 KB";
+  return (v.partial ? "≥ " : "") + fmtSize(v.size);
+}
+
 const Thumb: React.FC<{ entry: EntryMeta; size: number }> = ({ entry, size }) => {
   const [url, setUrl] = useState<string | null>(THUMB_CACHE.get(entry.path) ?? null);
   const isImg = entry.ext && ["jpg", "png", "webp", "gif", "jpeg", "bmp", "svg"].includes(entry.ext);
@@ -54,6 +65,7 @@ export const FileList: React.FC<{
   compact?: boolean;
 }> = ({ entries, onOpen, compact }) => {
   const viewMode = useApp((s) => s.viewMode);
+  const folderSize = useApp((s) => s.folderSize);
   const selection = useApp((s) => s.selection);
   const setSelection = useApp((s) => s.setSelection);
   const cutPaths = useApp((s) => s.cutPaths);
@@ -61,6 +73,37 @@ export const FileList: React.FC<{
   const { defs } = useTags();
   const containerRef = useRef<HTMLDivElement>(null);
   const lastClickIndex = useRef(-1);
+
+  // —— 文件夹大小（后台异步，不阻塞列表）：当前目录里的文件夹分批请求 ——
+  const [dirSizes, setDirSizes] = useState<Map<string, { size: number; partial: boolean }>>(new Map());
+  const showsSizeCol = viewMode === "details" || (viewMode === "list" && !compact);
+  const dirPaths = useMemo(
+    () => (folderSize && showsSizeCol ? entries.filter((e) => e.isDir).map((e) => e.path) : []),
+    [entries, folderSize, showsSizeCol],
+  );
+  useEffect(() => {
+    if (!folderSize) return;
+    let alive = true;
+    (async () => {
+      const todo = dirPaths.filter((p) => !DIR_SIZE_MEMO.has(p) && !DIR_SIZE_INFLIGHT.has(p));
+      if (todo.length === 0) {
+        if (dirPaths.some((p) => DIR_SIZE_MEMO.has(p))) setDirSizes(new Map(DIR_SIZE_MEMO));
+        return;
+      }
+      for (const p of todo) DIR_SIZE_INFLIGHT.add(p);
+      try {
+        for (let i = 0; i < todo.length; i += 64) {
+          const res = await api.fsDirSizes(todo.slice(i, i + 64));
+          for (const r of res) DIR_SIZE_MEMO.set(r.path, { size: r.size, partial: r.partial });
+          if (alive) setDirSizes(new Map(DIR_SIZE_MEMO));
+        }
+      } catch { /* 后端不可用/已切换目录，静默 */ }
+      finally { for (const p of todo) DIR_SIZE_INFLIGHT.delete(p); }
+    })();
+    return () => { alive = false; };
+  }, [dirPaths, folderSize]);
+  const dirSizeOf = (p: string): string | undefined =>
+    folderSize ? dirSizeText(dirSizes.get(p) ?? DIR_SIZE_MEMO.get(p)) : undefined;
 
   const virtualizer = useVirtualizer({
     count: entries.length,
@@ -281,7 +324,7 @@ export const FileList: React.FC<{
                         )}
                       </span>
                       <span style={cellBase}>{fmtDate(e.mtime)}</span>
-                      <span style={{ ...cellBase, textAlign: "right" }}>{e.isDir ? "—" : fmtSize(e.size)}</span>
+                      <span style={{ ...cellBase, textAlign: "right" }}>{e.isDir ? dirSizeOf(e.path) ?? "—" : fmtSize(e.size)}</span>
                       <span style={{ display: "flex", gap: 4, overflow: "hidden" }}>{e.tags.map((t) => <TagChip key={t} name={t} size={10} />)}</span>
                     </div>
                   );
@@ -353,6 +396,7 @@ export const FileList: React.FC<{
               onMenu={(ev) => open(ev, entryMenu(e))}
               dragPathsOf={dragPaths}
               dropPropsOf={dropProps}
+              dirSizeOf={dirSizeOf}
             />
           );
         })}
@@ -372,7 +416,8 @@ const FileRow: React.FC<{
   onMenu: (ev: React.MouseEvent) => void;
   dragPathsOf: (e: EntryMeta) => string[];
   dropPropsOf: (e: EntryMeta) => Record<string, unknown>;
-}> = ({ entry, idx, selected, cut, style, onSelect, onOpen, onMenu, dragPathsOf, dropPropsOf }) => {
+  dirSizeOf: (path: string) => string | undefined;
+}> = ({ entry, idx, selected, cut, style, onSelect, onOpen, onMenu, dragPathsOf, dropPropsOf, dirSizeOf }) => {
   const compact = style !== undefined; // 虚拟化模式即紧凑列表
   const rowStyle: React.CSSProperties = {
     display: "flex", alignItems: "center", gap: 8, padding: compact ? "0 14px" : "6px 14px",
@@ -412,7 +457,7 @@ const FileRow: React.FC<{
       {!compact && (
         <>
           <span style={{ width: 120, color: "var(--ff-text-secondary)", fontSize: 12, textAlign: "right" }}>{fmtDate(entry.mtime)}</span>
-          <span style={{ width: 80, color: "var(--ff-text-secondary)", fontSize: 12, textAlign: "right" }}>{entry.isDir ? "—" : fmtSize(entry.size)}</span>
+          <span style={{ width: 80, color: "var(--ff-text-secondary)", fontSize: 12, textAlign: "right" }}>{entry.isDir ? dirSizeOf(entry.path) ?? "—" : fmtSize(entry.size)}</span>
         </>
       )}
     </div>

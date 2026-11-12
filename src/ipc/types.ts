@@ -175,16 +175,24 @@ export interface OpProgress {
 /** 虚拟化列表数据源：前端永不一次性持有 >2000 条完整记录（技术文档 §3） */
 export const PAGE_SIZE = 500;
 
+/** 大小显示规则：<1MB 用 KB，<1GB 用 MB，≥1GB 用 GB（超大进位 TB） */
 export function fmtSize(n: number): string {
   if (n === 0) return "—";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let i = 0;
-  let v = n;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${units[i]}`;
+  if (n < 1024) return `${n} B`;
+  const kb = n / 1024;
+  if (kb < 1024) return `${kb < 10 ? kb.toFixed(1) : Math.round(kb)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`;
+  const gb = mb / 1024;
+  if (gb < 1024) return `${gb < 10 ? gb.toFixed(1) : Math.round(gb)} GB`;
+  return `${(gb / 1024).toFixed(1)} TB`;
+}
+
+/** 文件夹大小信息（fs_dir_sizes 返回；partial=超时/超量截断，显示为 ≥） */
+export interface DirSizeInfo {
+  path: string;
+  size: number;
+  partial: boolean;
 }
 
 export function fmtDate(ms: number): string {

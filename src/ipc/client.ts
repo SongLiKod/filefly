@@ -46,6 +46,7 @@ export const api = {
   fsDrives: () => invoke<import("./types").DriveInfo[]>("fs_drives"),
   fsSpecialDirs: () => invoke<import("./types").SpecialDirs>("fs_special_dirs"),
   fsStat: (path: string) => invoke<import("./types").EntryMeta>("fs_stat", { path }),
+  fsDirSizes: (paths: string[]) => invoke<import("./types").DirSizeInfo[]>("fs_dir_sizes", { paths }),
   fsHomeStats: (home: string) => invoke<import("./types").HomeStats>("fs_home_stats", { home }),
   fsRecent: () => invoke<[string, string, number][]>("fs_recent"),
   fsRecentClear: () => invoke("fs_recent_clear"),

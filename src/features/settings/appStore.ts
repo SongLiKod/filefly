@@ -13,6 +13,7 @@ interface AppState {
   sortField: SortField;
   sortOrder: SortOrder;
   showHidden: boolean;
+  folderSize: boolean; // 显示文件夹大小（后台异步计算；关闭则完全不计算）
   filter: "" | "today" | "large" | "duplicate"; // F-08 筛选器
   settingsOpen: boolean;
   commandPaletteOpen: boolean;
@@ -30,6 +31,7 @@ interface AppState {
   setViewMode: (v: ViewMode) => void;
   setSort: (f: SortField, o?: SortOrder) => void;
   setShowHidden: (v: boolean) => void;
+  setFolderSize: (v: boolean) => void;
   setFilter: (f: AppState["filter"]) => void;
   setSelection: (paths: string[]) => void;
   toggleSidebar: () => void;
@@ -51,6 +53,7 @@ export const useApp = create<AppState>((set) => ({
   sortField: savedSortField && SORT_FIELDS.includes(savedSortField) ? savedSortField : "name",
   sortOrder: savedSortOrder === "desc" ? "desc" : "asc",
   showHidden: localStorage.getItem("ff-show-hidden") === "1",
+  folderSize: localStorage.getItem("ff-folder-size") !== "0", // 默认开启
   filter: "",
   settingsOpen: false,
   commandPaletteOpen: false,
@@ -88,6 +91,10 @@ export const useApp = create<AppState>((set) => ({
   setShowHidden: (showHidden) => {
     localStorage.setItem("ff-show-hidden", showHidden ? "1" : "0");
     set({ showHidden });
+  },
+  setFolderSize: (folderSize) => {
+    localStorage.setItem("ff-folder-size", folderSize ? "1" : "0");
+    set({ folderSize });
   },
   setFilter: (filter) => set((s) => ({ filter: s.filter === filter ? "" : filter })),
   setSelection: (selection) => set({ selection }),
