@@ -224,18 +224,17 @@ pub async fn fs_special_dirs() -> Result<SpecialDirs, String> {
 pub async fn fs_drives() -> Result<Vec<DriveInfo>, String> {
     tauri::async_runtime::spawn_blocking(|| {
         let mut out = Vec::new();
-        for letter in 'A'..='Z' {
-            let root = format!("{}:\\", letter);
-            if Path::new(&root).exists() {
-                let (total, free) = volume_stats(&root);
-                out.push(DriveInfo {
-                    name: format!("本地磁盘 ({})", letter),
-                    path: root.clone(),
-                    total,
-                    free,
-                    fs: crate::tags::ads::is_ntfs(&root).then(|| "NTFS".to_string()).unwrap_or_else(|| "exFAT/FAT".into()),
-                });
-            }
+        // 真实盘符列表（GetLogicalDrivesW）：避免 A..Z exists() 逐个探测在断连网络盘上阻塞
+        for root in crate::fs::drive_letters() {
+            let letter = root.chars().next().unwrap_or('C');
+            let (total, free) = volume_stats(&root);
+            out.push(DriveInfo {
+                name: format!("本地磁盘 ({})", letter),
+                path: root.clone(),
+                total,
+                free,
+                fs: crate::tags::ads::is_ntfs(&root).then(|| "NTFS".to_string()).unwrap_or_else(|| "exFAT/FAT".into()),
+            });
         }
         Ok(out)
     })

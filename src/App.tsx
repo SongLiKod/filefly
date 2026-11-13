@@ -155,7 +155,9 @@ export default function App() {
             const active = t.id === tabs.activeTabId;
             const p = t.path;
             return (
-              <div key={t.id} style={{ display: active ? "flex" : "none", flex: 1, minWidth: 0 }}>
+              // 块级容器：子视图（HomePage/SpecialView 等）根元素 height:100% 自动占满，
+              // 不可用 flex（flex 行内子元素按内容宽度收缩，会导致页面不撑满窗口）
+              <div key={t.id} style={{ display: active ? "block" : "none", flex: 1, minWidth: 0 }}>
                 {p === "__vault__" ? (
                   <VaultView />
                 ) : p === "__home__" || p === "" ? (
@@ -165,7 +167,9 @@ export default function App() {
                 ) : p.startsWith("__") ? (
                   <SpecialView path={p} />
                 ) : (
-                  <div style={{ display: "flex", flex: 1, minWidth: 0 }} tabIndex={0}
+                  // height:100% 必须显式：块级父容器下 height:auto 由内容决定，
+                  // 缺失会导致 BrowserPane 的 height:100% 解析失效、文件列表无法滚动
+                  <div style={{ display: "flex", height: "100%", minWidth: 0 }} tabIndex={0}
                     onKeyDown={(e) => { if (e.key === "Tab") e.preventDefault(); }}>
                     <BrowserPane side="left" tabId={t.id} active={active} />
                     {active && tabs.dualPane && (

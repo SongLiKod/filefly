@@ -242,6 +242,21 @@ export interface CleanTarget {
   cleanable: boolean;
 }
 
+/** 清理项扫描结果（cancelled=用户中途取消，结果不完整） */
+export interface CleanTargetsResult {
+  targets: CleanTarget[];
+  cancelled: boolean;
+}
+
+/** 清理项扫描进度事件（clean:progress） */
+export interface CleanScanProgress {
+  kind: "start" | "dir" | "done";
+  index?: number;
+  total?: number;
+  name?: string;
+  dir?: string;
+}
+
 export interface CleanReport {
   freed: number;
   failed: string[];

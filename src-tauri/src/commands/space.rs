@@ -12,6 +12,9 @@ use tauri::{AppHandle, Emitter};
 
 type S<'a> = tauri::State<'a, crate::AppState>;
 
+/// 清理项扫描取消令牌（与空间分析扫描令牌独立）
+pub const CLEAN_SCAN_TOKEN: &str = "clean-scan";
+
 #[tauri::command]
 pub async fn fs_space_scan(root: String, app: AppHandle) -> Result<ScanResult, String> {
     tauri::async_runtime::spawn_blocking(move || space::scan_children(Some(&app), &root))
@@ -101,56 +104,101 @@ fn preset_targets() -> Vec<(&'static str, &'static str, &'static str, Vec<PathBu
     v
 }
 
-/// 并行测量各目标大小（每目标 8s deadline，超时 partial）
+/// 清理项扫描结果（cancelled 标记用户中途取消，结果不完整）
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanTargetsResult {
+    pub targets: Vec<CleanTarget>,
+    pub cancelled: bool,
+}
+
+/// 并行测量各目标大小（每目标 8s deadline，超时 partial）。
+/// 实时性：目标开始/完成各发一条 clean:progress；测量中每 100 目录上报当前路径。
 #[tauri::command]
-pub async fn fs_clean_targets() -> Result<Vec<CleanTarget>, String> {
-    tauri::async_runtime::spawn_blocking(|| {
+pub async fn fs_clean_targets(app: AppHandle) -> Result<CleanTargetsResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::clear_token(CLEAN_SCAN_TOKEN);
         let presets = preset_targets();
+        let total = presets.len();
         let next = AtomicUsize::new(0);
         let collected: Mutex<Vec<CleanTarget>> = Mutex::new(Vec::new());
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
         let workers = presets.len().min(8);
         std::thread::scope(|s| {
             for _ in 0..workers {
                 s.spawn(|| loop {
+                    if crate::is_cancelled(CLEAN_SCAN_TOKEN) {
+                        cancelled.store(true, Ordering::Relaxed);
+                        break;
+                    }
                     let i = next.fetch_add(1, Ordering::SeqCst);
                     if i >= presets.len() { break; }
                     let (id, name, desc, paths) = &presets[i];
+                    let _ = app.emit("clean:progress", serde_json::json!({
+                        "kind": "start", "index": i + 1, "total": total, "name": name,
+                    }));
                     let deadline = Instant::now() + Duration::from_secs(8);
                     let mut size = 0u64;
                     let mut partial = false;
+                    let app2 = &app;
                     if id != &"recycle_bin" {
                         for p in paths {
-                            let (s, pt) = measure_path(Path::new(p), deadline);
+                            let (s, pt) = measure_path(Path::new(p), deadline,
+                                || crate::is_cancelled(CLEAN_SCAN_TOKEN),
+                                &|d: &Path| {
+                                    let _ = app2.emit("clean:progress", serde_json::json!({
+                                        "kind": "dir", "name": name, "dir": d.to_string_lossy(),
+                                    }));
+                                });
                             size += s;
                             partial |= pt;
                         }
                     } else {
                         size = trash::total_size().unwrap_or(0);
                     }
-                    collected.lock().unwrap().push(CleanTarget {
+                    let t = CleanTarget {
                         id: id.to_string(), name: name.to_string(), description: desc.to_string(),
                         paths: paths.iter().map(|p| p.to_string_lossy().to_string()).collect(),
                         size, partial, cleanable: size > 0,
-                    });
+                    };
+                    // 单个目标完成即实时推送，前端边扫边显示
+                    let _ = app.emit("clean:target", serde_json::json!(t));
+                    let _ = app.emit("clean:progress", serde_json::json!({
+                        "kind": "done", "index": i + 1, "total": total, "name": name,
+                    }));
+                    collected.lock().unwrap().push(t);
+                    if crate::is_cancelled(CLEAN_SCAN_TOKEN) {
+                        cancelled.store(true, Ordering::Relaxed);
+                    }
                 });
             }
         });
+        let cancelled = cancelled.load(Ordering::Relaxed);
         let mut out = collected.into_inner().unwrap();
         out.sort_by(|a, b| b.size.cmp(&a.size));
-        Ok(out)
+        Ok(CleanTargetsResult { targets: out, cancelled })
     }).await.map_err(|e| e.to_string())?
 }
 
-/// 测量路径大小（迭代栈，同 scan 引擎纪律）
-fn measure_path(root: &Path, deadline: Instant) -> (u64, bool) {
+/// 取消清理项扫描
+#[tauri::command]
+pub fn fs_clean_targets_cancel() {
+    crate::cancel_token(CLEAN_SCAN_TOKEN);
+}
+
+/// 测量路径大小（迭代栈，同 scan 引擎纪律；支持取消与当前目录回调）
+fn measure_path(root: &Path, deadline: Instant, cancelled: impl Fn() -> bool, on_dir: &dyn Fn(&Path)) -> (u64, bool) {
     let mut total = 0u64;
     let mut partial = false;
+    let mut seen = 0usize;
     let mut stack = vec![root.to_path_buf()];
     'outer: while let Some(dir) = stack.pop() {
-        if Instant::now() >= deadline { partial = true; break; }
+        if cancelled() || Instant::now() >= deadline { partial = true; break; }
+        seen += 1;
+        if seen % 100 == 0 { on_dir(&dir); }
         let rd = match std::fs::read_dir(&dir) { Ok(r) => r, Err(_) => continue };
         for entry in rd.flatten() {
-            if Instant::now() >= deadline { partial = true; break 'outer; }
+            if cancelled() || Instant::now() >= deadline { partial = true; break 'outer; }
             let Ok(ft) = entry.file_type() else { continue };
             if ft.is_symlink() { continue; }
             if ft.is_dir() { stack.push(entry.path()); }
@@ -185,7 +233,8 @@ pub async fn fs_clean_execute(ids: Vec<String>, app: AppHandle) -> Result<CleanR
                 for entry in rd.flatten() {
                     let path = entry.path();
                     // 删除前先测量（被锁文件删除失败不计 freed）
-                    let (size, _) = measure_path(&path, Instant::now() + Duration::from_secs(5));
+                    let (size, _) = measure_path(&path, Instant::now() + Duration::from_secs(5),
+                        || false, &|_| {});
                     let r = if path.is_dir() {
                         std::fs::remove_dir_all(&path)
                     } else {

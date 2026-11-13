@@ -146,6 +146,7 @@ pub fn run() {
             commands::space::fs_space_scan,
             commands::space::fs_space_cancel,
             commands::space::fs_clean_targets,
+            commands::space::fs_clean_targets_cancel,
             commands::space::fs_clean_execute,
             commands::fs::fs_batch_rename,
             commands::fs::fs_archive_list,

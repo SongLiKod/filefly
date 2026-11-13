@@ -2,7 +2,7 @@
 // 架构：占用分布（点击钻取）+ Top 大文件 + 预设白名单清理目标
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { api, onEvent } from "@/ipc/client";
-import type { CleanTarget, DirStat, ScanProgress, ScanResult } from "@/ipc/types";
+import type { CleanScanProgress, CleanTarget, DirStat, ScanProgress, ScanResult } from "@/ipc/types";
 import { fmtSize } from "@/ipc/types";
 import { useApp } from "@/features/settings/appStore";
 import { alertDialog, confirmDialog } from "@/components/dialog";
@@ -24,6 +24,10 @@ export const SpaceView: React.FC = () => {
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [targets, setTargets] = useState<CleanTarget[] | null>(null);
   const [targetsLoading, setTargetsLoading] = useState(false);
+  const [cleanProgress, setCleanProgress] = useState<CleanScanProgress | null>(null);
+  const [cleanDone, setCleanDone] = useState(0);
+  const [cleanTotal, setCleanTotal] = useState(0);
+  const [cleanCancelled, setCleanCancelled] = useState(false);
   const [checked, setChecked] = useState<Record<string, boolean>>({});
   const [cleaning, setCleaning] = useState(false);
   const scanSeq = useRef(0);
@@ -40,6 +44,23 @@ export const SpaceView: React.FC = () => {
   // 扫描进度事件
   useEffect(() => onEvent("space:progress", (p) => {
     setProgress(p as ScanProgress);
+  }), []);
+
+  // 清理项扫描：实时进度（含当前正在测量的目录）与流式结果
+  useEffect(() => onEvent("clean:progress", (p) => {
+    const e = p as CleanScanProgress;
+    if (!e || !e.kind) return; // 清理执行阶段的旧事件无 kind 字段，忽略
+    setCleanProgress(e);
+    if (e.total) setCleanTotal(e.total);
+    if (e.kind === "done") setCleanDone((n) => Math.max(n, e.index ?? 0));
+  }), []);
+  useEffect(() => onEvent("clean:target", (t) => {
+    const target = t as CleanTarget;
+    if (!target?.id) return;
+    setTargets((prev) => {
+      const list = prev ? prev.filter((x) => x.id !== target.id) : [];
+      return [...list, target].sort((a, b) => b.size - a.size);
+    });
   }), []);
 
   const scan = useCallback(async (targetRoot: string, label: string, push: boolean) => {
@@ -65,14 +86,23 @@ export const SpaceView: React.FC = () => {
 
   const scanTargets = async () => {
     setTargetsLoading(true);
+    setTargets([]); // 清空后由 clean:target 事件流式填充
+    setChecked({});
+    setCleanDone(0);
+    setCleanTotal(0);
+    setCleanCancelled(false);
+    setCleanProgress(null);
     try {
-      const t = await api.fsCleanTargets();
-      setTargets(t);
-      setChecked(Object.fromEntries(t.filter((x) => x.cleanable).map((x) => [x.id, true])));
+      const r = await api.fsCleanTargets();
+      setTargets(r.targets); // 最终结果以后端权威返回为准
+      setCleanCancelled(r.cancelled);
+      setChecked(Object.fromEntries(r.targets.filter((x) => x.cleanable).map((x) => [x.id, true])));
     } catch (e) {
       await alertDialog("扫描清理项失败", String(e), "error");
+      setTargets(null);
     } finally {
       setTargetsLoading(false);
+      setCleanProgress(null);
     }
   };
 
@@ -225,20 +255,52 @@ export const SpaceView: React.FC = () => {
       {/* 清理面板 */}
       <h4 style={{ margin: "0 0 8px", fontSize: 12, color: "var(--ff-text-secondary)", textTransform: "uppercase", letterSpacing: 0.5 }}>磁盘清理</h4>
       <div style={{ border: "1px solid var(--ff-border)", borderRadius: 10, padding: 14 }}>
-        {!targets && (
+        {/* 扫描入口（未扫描时） */}
+        {!targetsLoading && !targets && (
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <span style={{ fontSize: 12, color: "var(--ff-text-secondary)" }}>扫描常见缓存/临时文件的占用（用户临时、浏览器缓存、缩略图、npm/pip、回收站等）</span>
-            <button className="btn-primary" disabled={targetsLoading} onClick={scanTargets} style={{ marginLeft: "auto" }}>
-              {targetsLoading ? "扫描中…" : "扫描可清理项"}
+            <button className="btn-primary" onClick={scanTargets} style={{ marginLeft: "auto" }}>
+              扫描可清理项
             </button>
           </div>
         )}
-        {targets && (
+
+        {/* 扫描进度：当前目标 + 正在测量的目录 + 完成计数 + 取消按钮 */}
+        {targetsLoading && (
+          <div style={{ marginBottom: targets && targets.length > 0 ? 12 : 0 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ flex: 1, height: 6, borderRadius: 3, background: "var(--ff-border)", overflow: "hidden" }}>
+                <div className="scan-indeterminate" style={{ height: "100%", width: "30%", background: "var(--ff-primary)", animation: "ff-indeterminate 1.2s ease-in-out infinite" }} />
+              </div>
+              <span style={{ fontSize: 12, color: "var(--ff-text-secondary)", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
+                已完成 {cleanDone}/{cleanTotal || "…"}
+              </span>
+              <button className="btn-ghost" onClick={() => api.fsCleanScanCancel().catch(() => {})}>
+                <Icons.Close size={13} /> 取消扫描
+              </button>
+            </div>
+            <div style={{ fontSize: 11, color: "var(--ff-text-disabled)", marginTop: 5, wordBreak: "break-all" }}>
+              {cleanProgress?.kind === "dir" && cleanProgress.dir
+                ? <>正在测量 <strong style={{ color: "var(--ff-text-secondary)" }}>{cleanProgress.name}</strong>：{cleanProgress.dir}</>
+                : cleanProgress?.kind === "start"
+                  ? <>正在测量 <strong style={{ color: "var(--ff-text-secondary)" }}>{cleanProgress.name}</strong>（{cleanProgress.index}/{cleanProgress.total}）…</>
+                  : "正在准备扫描清理目标…"}
+            </div>
+          </div>
+        )}
+
+        {/* 已测出的目标：扫描中实时流入，扫描后完整显示 */}
+        {targets && targets.length > 0 && (
           <>
+            {cleanCancelled && !targetsLoading && (
+              <div style={{ fontSize: 12, color: "var(--ff-danger)", marginBottom: 10 }}>
+                扫描已取消，以下结果不完整，可重新扫描。
+              </div>
+            )}
             <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
               {targets.map((t) => (
-                <label key={t.id} style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13, cursor: t.cleanable ? "pointer" : "default", opacity: t.cleanable ? 1 : 0.55 }}>
-                  <input type="checkbox" disabled={!t.cleanable || cleaning}
+                <label key={t.id} style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13, cursor: t.cleanable && !targetsLoading ? "pointer" : "default", opacity: t.cleanable ? 1 : 0.55 }}>
+                  <input type="checkbox" disabled={!t.cleanable || cleaning || targetsLoading}
                     checked={!!checked[t.id]}
                     onChange={(e) => setChecked((prev) => ({ ...prev, [t.id]: e.target.checked }))} />
                   <div style={{ flex: 1 }}>
@@ -248,18 +310,23 @@ export const SpaceView: React.FC = () => {
                 </label>
               ))}
             </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button className="btn-ghost" disabled={cleaning} onClick={scanTargets}>↻ 重新扫描</button>
-              <button className="btn-primary" disabled={cleaning || Object.values(checked).every((v) => !v)}
-                style={Object.values(checked).some((v) => v) ? { background: "var(--ff-danger)", borderColor: "var(--ff-danger)" } : undefined}
-                onClick={executeClean}>
-                {cleaning ? "清理中…" : "清理选中项（永久删除）"}
-              </button>
-              <span style={{ fontSize: 11, color: "var(--ff-text-disabled)", alignSelf: "center" }}>
-                仅删除缓存内容本身；密码、书签、历史、个人文档不受影响
-              </span>
-            </div>
+            {!targetsLoading && (
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="btn-ghost" disabled={cleaning} onClick={scanTargets}>↻ 重新扫描</button>
+                <button className="btn-primary" disabled={cleaning || Object.values(checked).every((v) => !v)}
+                  style={Object.values(checked).some((v) => v) ? { background: "var(--ff-danger)", borderColor: "var(--ff-danger)" } : undefined}
+                  onClick={executeClean}>
+                  {cleaning ? "清理中…" : "清理选中项（永久删除）"}
+                </button>
+                <span style={{ fontSize: 11, color: "var(--ff-text-disabled)", alignSelf: "center" }}>
+                  仅删除缓存内容本身；密码、书签、历史、个人文档不受影响
+                </span>
+              </div>
+            )}
           </>
+        )}
+        {targetsLoading && (targets?.length ?? 0) === 0 && (
+          <div style={{ fontSize: 12, color: "var(--ff-text-secondary)" }}>正在测量各清理目标的大小，结果会实时显示在这里…</div>
         )}
       </div>
     </div>

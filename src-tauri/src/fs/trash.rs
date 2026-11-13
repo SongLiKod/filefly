@@ -38,32 +38,60 @@ fn parse_i_file(data: &[u8]) -> Option<(u64, i64, String)> {
     if name.is_empty() { None } else { Some((size, deleted_ms, name)) }
 }
 
-/// 列出所有盘回收站里的项目（无权限的 SID 目录自动跳过）
-pub fn list() -> Vec<TrashItem> {
+/// 单盘回收站枚举（$I 元数据解析）
+fn list_drive(drive: &str) -> Vec<TrashItem> {
     let mut out = Vec::new();
-    for letter in 'A'..='Z' {
-        let drive = format!("{}:\\", letter);
-        if !Path::new(&drive).exists() { continue; }
-        let rb = PathBuf::from(format!("{}$Recycle.Bin", drive));
-        let Ok(sids) = std::fs::read_dir(&rb) else { continue };
-        for sid in sids.filter_map(|s| s.ok()) {
-            let Ok(entries) = std::fs::read_dir(sid.path()) else { continue };
-            for e in entries.filter_map(|e| e.ok()) {
-                let fname = e.file_name().to_string_lossy().to_string();
-                if !fname.starts_with("$I") { continue; }
-                let Ok(data) = std::fs::read(e.path()) else { continue };
-                let Some((size, deleted_at, orig)) = parse_i_file(&data) else { continue };
-                let r_path = sid.path().join(format!("$R{}", &fname[2..]));
-                let orig_name = orig.rsplit(['\\', '/']).next().unwrap_or(&orig).to_string();
-                out.push(TrashItem {
-                    id: r_path.to_string_lossy().to_string(),
-                    i_path: e.path().to_string_lossy().to_string(),
-                    orig_path: orig,
-                    orig_name,
-                    size,
-                    deleted_at,
-                });
-            }
+    let rb = PathBuf::from(format!("{}$Recycle.Bin", drive));
+    let Ok(sids) = std::fs::read_dir(&rb) else { return out };
+    for sid in sids.filter_map(|s| s.ok()) {
+        let Ok(entries) = std::fs::read_dir(sid.path()) else { continue };
+        for e in entries.filter_map(|e| e.ok()) {
+            let fname = e.file_name().to_string_lossy().to_string();
+            if !fname.starts_with("$I") { continue; }
+            let Ok(data) = std::fs::read(e.path()) else { continue };
+            let Some((size, deleted_at, orig)) = parse_i_file(&data) else { continue };
+            let r_path = sid.path().join(format!("$R{}", &fname[2..]));
+            let orig_name = orig.rsplit(['\\', '/']).next().unwrap_or(&orig).to_string();
+            out.push(TrashItem {
+                id: r_path.to_string_lossy().to_string(),
+                i_path: e.path().to_string_lossy().to_string(),
+                orig_path: orig,
+                orig_name,
+                size,
+                deleted_at,
+            });
+        }
+    }
+    out
+}
+
+/// 列出所有盘回收站里的项目（无权限的 SID 目录自动跳过）。
+/// 性能纪律：只枚举真实盘符 + 各盘并行（总耗时=最慢单盘而非累加）+ 15s 总预算，
+/// 超预算返回已收集的部分（此前串行探测 A..Z，断连网络盘逐个阻塞 5~10s 导致超时）。
+pub fn list() -> Vec<TrashItem> {
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::{Duration, Instant};
+
+    let drives = crate::fs::drive_letters();
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<TrashItem>>();
+    for d in &drives {
+        let tx = tx.clone();
+        let dd = d.clone();
+        // JoinHandle drop 即分离：即使本函数超预算提前返回，慢盘线程自行结束（send 进已丢弃的通道无害）
+        std::thread::spawn(move || {
+            let _ = tx.send(list_drive(&dd));
+        });
+    }
+    drop(tx);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut out = Vec::new();
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() { break; }
+        match rx.recv_timeout(left) {
+            Ok(items) => out.extend(items),
+            Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => break,
         }
     }
     out.sort_by(|a, b| b.deleted_at.cmp(&a.deleted_at));
